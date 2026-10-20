@@ -61,6 +61,12 @@ sudo launchctl kickstart -k system/com.apple.audio.coreaudiod
 
 The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 128 outputs.
 
+Apps that pick a device by UID need `com.aes67.driver.device`. JACK is one: `-d` takes the UID, and with anything else (including the name "AES67 Device") it quietly falls back to the system default devices.
+
+```bash
+jackd -d coreaudio -d com.aes67.driver.device -r 48000 -p 256
+```
+
 ## Configuration
 
 Streams are read from `streams.json`, looked for in this order:
