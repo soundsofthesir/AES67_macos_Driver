@@ -9,6 +9,7 @@
 #include "../Shared/Types.h"
 #include "../Driver/SDPParser.h"
 #include "StreamChannelMapper.h"
+#include "Json.h"
 #include <string>
 #include <vector>
 #include <optional>
@@ -44,6 +45,25 @@ struct PersistedStreamConfig {
     bool isValid() const;
 };
 
+/// One entry of streams.json. `raw` is the entry as it was in the file;
+/// `config` is empty when it couldn't be read (a field of the wrong type, a
+/// number out of range, or an invalid stream). An entry the driver doesn't
+/// load is written back from `raw`, so nothing in the file is lost.
+struct SavedStreamEntry {
+    std::optional<PersistedStreamConfig> config;
+    JsonValue raw;
+};
+
+struct LoadedStreamConfig {
+    enum class Status {
+        Missing,  ///< no config file
+        Corrupt,  ///< not JSON, or not shaped like streams.json (copied to .bak)
+        Loaded,
+    };
+    Status status{Status::Missing};
+    std::vector<SavedStreamEntry> entries;
+};
+
 //
 // Stream Configuration Manager
 //
@@ -71,7 +91,7 @@ public:
 
     /// Get all config search paths in order of priority.
     /// Search order:
-    ///   1. AES67_CONFIG_PATH environment variable (if set)
+    ///   1. AES67_CONFIG_PATH environment variable (if set, and then only that)
     ///   2. ~/Library/Application Support/AES67Driver/streams.json (user)
     ///   3. /Library/Application Support/AES67Driver/streams.json (system)
     static std::vector<std::string> getConfigSearchPaths();
@@ -84,11 +104,14 @@ public:
     // Save/Load Operations
     //
 
-    // Save all stream configurations to file
-    bool saveConfig(const std::vector<PersistedStreamConfig>& configs);
+    /// Write all stream configurations, followed by `kept` (entries from the
+    /// file that weren't loaded, written back unchanged). The file is
+    /// replaced atomically: on any error the old file is left as it was.
+    bool saveConfig(const std::vector<PersistedStreamConfig>& configs,
+                    const std::vector<JsonValue>& kept = {});
 
-    // Load all stream configurations from file
-    std::optional<std::vector<PersistedStreamConfig>> loadConfig();
+    /// Read the config file. A corrupt file is copied to <path>.bak.
+    LoadedStreamConfig loadConfig();
 
     // Save a single stream configuration (append or update)
     bool saveStream(const PersistedStreamConfig& config);
@@ -100,17 +123,19 @@ public:
     // JSON Serialization
     //
 
-    // Convert stream configs to JSON string
-    static std::string toJSON(const std::vector<PersistedStreamConfig>& configs);
+    // Convert stream configs (and kept entries) to JSON text
+    static std::string toJSON(const std::vector<PersistedStreamConfig>& configs,
+                              const std::vector<JsonValue>& kept = {});
 
-    // Parse stream configs from JSON string
-    static std::optional<std::vector<PersistedStreamConfig>> fromJSON(const std::string& json);
+    /// Parse a whole file. nullopt if it isn't a JSON object with a "streams"
+    /// array; a bad entry only makes that entry unreadable.
+    static std::optional<std::vector<SavedStreamEntry>> fromJSON(const std::string& json);
 
-    // Convert single config to JSON object string
-    static std::string configToJSON(const PersistedStreamConfig& config);
+    static JsonValue configToJSON(const PersistedStreamConfig& config);
 
-    // Parse single config from JSON object string
-    static std::optional<PersistedStreamConfig> configFromJSON(const std::string& json);
+    /// nullopt if a field has the wrong type or doesn't fit, or the result
+    /// isn't a valid stream. Missing fields keep their defaults.
+    static std::optional<PersistedStreamConfig> configFromJSON(const JsonValue& json);
 
     //
     // Helper Functions
@@ -130,24 +155,8 @@ private:
     std::string configPath_;
     std::string defaultConfigFile_{"streams.json"};
 
-    // Helper methods for JSON serialization
-    static std::string escapeJSON(const std::string& str);
-    static std::string sdpToJSON(const SDPSession& sdp);
-    static std::string mappingToJSON(const ChannelMapping& mapping);
-
-    // Helper methods for JSON deserialization
-    static std::optional<SDPSession> sdpFromJSON(const std::string& json);
-    static std::optional<ChannelMapping> mappingFromJSON(const std::string& json);
-
-    // Simple JSON parsing helpers
-    static std::optional<std::string> extractStringField(const std::string& json, const std::string& field);
-    static std::optional<uint64_t> extractUInt64Field(const std::string& json, const std::string& field);
-    static std::optional<uint32_t> extractUInt32Field(const std::string& json, const std::string& field);
-    static std::optional<uint16_t> extractUInt16Field(const std::string& json, const std::string& field);
-    static std::optional<uint8_t> extractUInt8Field(const std::string& json, const std::string& field);
-    static std::optional<double> extractDoubleField(const std::string& json, const std::string& field);
-    static std::optional<bool> extractBoolField(const std::string& json, const std::string& field);
-    static std::optional<int> extractIntField(const std::string& json, const std::string& field);
+    static JsonValue sdpToJSON(const SDPSession& sdp);
+    static JsonValue mappingToJSON(const ChannelMapping& mapping);
 };
 
 } // namespace AES67

@@ -100,6 +100,23 @@ target_include_directories(TestStreamManager PRIVATE
 
 target_compile_features(TestStreamManager PRIVATE cxx_std_17)
 
+# Test: JSON reader/writer and streams.json save/load
+add_executable(TestStreamConfig
+    TestStreamConfig.cpp
+    ../NetworkEngine/Json.cpp
+    ../NetworkEngine/StreamConfig.cpp
+    ../NetworkEngine/NetworkUtils.cpp
+    ../NetworkEngine/StreamChannelMapper.cpp
+    ../Driver/SDPParser.cpp
+    ../Shared/Types.cpp
+)
+
+target_include_directories(TestStreamConfig PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestStreamConfig PRIVATE cxx_std_17)
+
 # Integration Test: Multi-Stream Scenarios
 add_executable(TestMultiStream
     TestMultiStream.cpp
@@ -395,6 +412,7 @@ add_test(NAME RingBuffer COMMAND TestRingBuffer)
 add_test(NAME RTPReceiver COMMAND TestRTPReceiver)
 add_test(NAME RTPTransmitter COMMAND TestRTPTransmitter)
 add_test(NAME StreamManager COMMAND TestStreamManager)
+add_test(NAME StreamConfig COMMAND TestStreamConfig)
 add_test(NAME MultiStream COMMAND TestMultiStream)
 add_test(NAME IntegrationAudioPath COMMAND TestIntegrationAudioPath)
 add_test(NAME SAPListener COMMAND TestSAPListener)
@@ -424,6 +442,7 @@ message(STATUS "  - TestRingBuffer")
 message(STATUS "  - TestRTPReceiver")
 message(STATUS "  - TestRTPTransmitter")
 message(STATUS "  - TestStreamManager")
+message(STATUS "  - TestStreamConfig")
 message(STATUS "  - TestMultiStream (Integration)")
 message(STATUS "  - TestIntegrationAudioPath (Integration)")
 message(STATUS "")

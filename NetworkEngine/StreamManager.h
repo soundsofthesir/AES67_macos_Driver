@@ -198,8 +198,15 @@ public:
     // Configuration Persistence
     //
 
-    /// Load saved stream configurations from /tmp/AES67Driver/streams.json.
+    /// Load the saved streams (streams.json, see StreamConfigManager).
+    /// Entries not loaded (disabled, unreadable, or failing to start) are
+    /// kept and written back on every save.
+    /// @return true if at least one stream was loaded.
     bool loadSavedStreams();
+
+    /// Whether the last loadSavedStreams() found a config file, even one
+    /// with no usable streams (or a corrupt one).
+    bool foundSavedConfig() const;
 
     /// Persist all current streams to disk.
     bool saveAllStreams();
@@ -275,6 +282,7 @@ private:
 
 
     // Configuration helpers
+    bool loadSavedStream(const PersistedStreamConfig& config);  // caller holds streamsMutex_
     void autoSaveIfEnabled();
     bool saveAllStreamsInternal();  // Internal version without locking
 
@@ -300,6 +308,8 @@ private:
     // Configuration management
     std::unique_ptr<StreamConfigManager> configManager_;
     bool autoSaveEnabled_{true};
+    std::vector<JsonValue> keptEntries_;  // saved entries not loaded; guarded by streamsMutex_
+    bool savedConfigFound_{false};        // guarded by streamsMutex_
 
     // IO lifecycle state — true when Core Audio IO is active (StartIO/StopIO)
     std::atomic<bool> ioActive_{false};

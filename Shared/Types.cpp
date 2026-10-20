@@ -31,15 +31,27 @@ StreamID::StreamID(const std::string& uuidString) {
     std::string cleaned = uuidString;
     cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '-'), cleaned.end());
 
+    std::memset(uuid_.data(), 0, 16);
     if (cleaned.length() != 32) {
-        std::memset(uuid_.data(), 0, 16);
         return;
     }
 
+    // Anything that isn't hex leaves the ID null (it comes from streams.json,
+    // where a typo must not throw)
+    const auto hexValue = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::array<uint8_t, 16> parsed{};
     for (size_t i = 0; i < 16; i++) {
-        std::string byteStr = cleaned.substr(i * 2, 2);
-        uuid_[i] = static_cast<uint8_t>(std::stoul(byteStr, nullptr, 16));
+        const int high = hexValue(cleaned[i * 2]);
+        const int low = hexValue(cleaned[i * 2 + 1]);
+        if (high < 0 || low < 0) return;
+        parsed[i] = static_cast<uint8_t>((high << 4) | low);
     }
+    uuid_ = parsed;
 }
 
 bool StreamID::operator==(const StreamID& other) const {
