@@ -481,9 +481,19 @@ void testPtpTakesTheDeviceClock() {
     const uint32_t generation = device->GetMediaClock().snapshot().generation;
     const double nominal = MediaClock::samplesPerTick(48000.0, 1.0, HostTimebase::current());
     auto rateNow = [&] { return (device->GetMediaClock().snapshot().samplesPerTick / nominal - 1.0) * 1e6; };
-    // Just after lock PTP is still pulling in a sample or two of phase, which
-    // moves the rate by tens of ppm; the received stream would move it by hundreds
-    CHECK(std::fabs(rateNow() - 100.0) < 50, "at the master's +100 ppm (" << rateNow() << ")");
+    // Just after lock the servo's line still moves (on lo0 its slope by up to
+    // ~25 ppm a refit, and its value now by up to ~200 us), and PTP slews each
+    // move out at up to maxSlewPpm. So the clock is judged against the
+    // servo's rate, within that slew; the margin allows for the rate and the
+    // status being a step apart. The received stream moves it by hundreds
+    auto servoRate = [&] {
+        const auto estimate = device->GetPtpClockSource()->status().receiver.estimate;
+        return estimate ? (estimate->rate - 1.0) * 1e6 : 0.0;
+    };
+    const double allowed = PtpClockControl::Config{}.maxSlewPpm + 25.0;
+    CHECK(std::fabs(servoRate() - 100.0) < 50, "the servo at the master's +100 ppm (" << servoRate() << ")");
+    CHECK(std::fabs(rateNow() - servoRate()) < allowed,
+          "the clock at the servo's rate (" << rateNow() << " vs " << servoRate() << ")");
 
     // A sender 1500 ppm fast: the recovered clock would chase it; PTP must not let it
     LoopbackSender sender("239.1.1.1", 5004);
@@ -493,11 +503,11 @@ void testPtpTakesTheDeviceClock() {
     double worst = 0;
     for (uint32_t i = 0; i < 2000; ++i) {
         sender.sendL24(static_cast<uint16_t>(i), i * kFramesPerPacket, 8, 0.5f);
-        if (i % 100 == 0) worst = std::max(worst, std::fabs(rateNow() - 100.0));
+        if (i % 100 == 0) worst = std::max(worst, std::fabs(rateNow() - servoRate()));
         std::this_thread::sleep_until(next += period);
     }
     AudioThreadPriority::restoreNormalPriority();
-    CHECK(worst < 50, "still at the master's rate with a fast stream arriving (worst " << worst << " ppm off)");
+    CHECK(worst < allowed, "still at the servo's rate with a fast stream arriving (worst " << worst << " ppm off)");
     CHECK(device->GetMediaClock().snapshot().generation == generation, "and never a new timeline");
 
     // TX on PTP time: each packet's RTP timestamp (mediaclk offset 0) is the

@@ -6,6 +6,14 @@
 // Delay_Req by multicast or unicast. Test ports and TTL 0, so nothing
 // reaches the network.
 //
+// Two-step, its Follow_Up carries the kernel's time for its own copy of
+// the Sync on lo0, as a master's hardware stamps the time a Sync leaves.
+// The kernel stamps each socket's copy as it delivers it, so a receiver's
+// copy is stamped 0 to ~35 us earlier: a steady error. A time read before
+// sending would include the send call itself, which takes 40 to 300 us
+// depending on how fast the CPU is running, and Syncs whose fastest delay
+// moves like that defeat the servo's lock test.
+//
 
 #pragma once
 
@@ -19,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <net/if.h>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -78,19 +87,33 @@ private:
 
     void sendGroup(uint16_t port, const std::vector<uint8_t>& bytes) { send_.sendTo(kGroup, port, bytes.data(), bytes.size()); }
 
+    // The correction field carries part of t1 (as a transparent clock
+    // would): t1 = origin + correction
+    Timestamp originOf(uint64_t t1) const { return timestampOf(t1 - static_cast<uint64_t>(s_.followUpCorrectionNs)); }
+    int64_t scaledCorrection() const { return s_.followUpCorrectionNs * 65536; }
+
     void sendSync() {
         const uint16_t seq = syncSequence_++;
         const uint64_t t1 = clockAt(hostNanos());  // just before it leaves
-        const int64_t c = s_.followUpCorrectionNs;
-        // The correction field carries part of t1 (as a transparent clock
-        // would): t1 = origin + correction
-        const Timestamp origin = timestampOf(t1 - static_cast<uint64_t>(c));
-        const int64_t scaled = c * 65536;
         if (s_.twoStep) {
+            // The Follow_Up goes when the Sync comes back on lo0, with the
+            // kernel's time for it (or this one, should it not come back)
             sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, true, Timestamp{}));
-            sendGroup(s_.generalPort, buildFollowUp(identity_, 0, seq, s_.logSyncInterval, origin, scaled));
+            pendingFollowUp_ = PendingFollowUp{seq, t1, hostNanos()};
         } else {
-            sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, false, origin, scaled));
+            sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, false, originOf(t1), scaledCorrection()));
+        }
+    }
+
+    void sendFollowUp(uint16_t seq, uint64_t t1) {
+        sendGroup(s_.generalPort, buildFollowUp(identity_, 0, seq, s_.logSyncInterval, originOf(t1), scaledCorrection()));
+        pendingFollowUp_.reset();
+    }
+
+    void onOwnSync(const Message& m, uint64_t ticks) {
+        if (pendingFollowUp_ && ticks != 0 && m.header.type == MessageType::Sync &&
+            m.header.sequenceId == pendingFollowUp_->sequence) {
+            sendFollowUp(pendingFollowUp_->sequence, clockAt(HostTimebase::current().ticksToNanos(ticks)));
         }
     }
 
@@ -101,13 +124,15 @@ private:
         sendGroup(s_.generalPort, buildAnnounce(identity_, 0, announceSequence_++, s_.logAnnounceInterval, body));
     }
 
-    void answerDelayRequests(Socket& socket, bool unicast) {
+    // Delay_Req to answer, and the master's own Syncs coming back
+    void readEventPort(Socket& socket, bool unicast) {
         uint8_t buffer[256];
         uint64_t ticks = 0;
         uint32_t source = 0;
         long n;
         while ((n = socket.receive(buffer, sizeof(buffer), ticks, source)) > 0) {
             const auto m = parse(buffer, static_cast<size_t>(n));
+            if (m && m->header.source.clock == identity_.clock) onOwnSync(*m, ticks);
             if (!m || m->header.type != MessageType::DelayReq || m->header.source.clock == identity_.clock) continue;
             (unicast ? unicastRequests_ : multicastRequests_).fetch_add(1);
             const uint64_t t4 = clockAt(HostTimebase::current().ticksToNanos(ticks));
@@ -134,14 +159,25 @@ private:
             if (now >= nextSync) { sendSync(); nextSync += syncNs; }
             pollfd fds[2] = {{multicastEvent_.fd(), POLLIN, 0}, {unicastEvent_.fd(), POLLIN, 0}};
             ::poll(fds, 2, 2);
-            answerDelayRequests(multicastEvent_, false);
-            answerDelayRequests(unicastEvent_, true);
+            readEventPort(multicastEvent_, false);
+            readEventPort(unicastEvent_, true);
+            if (pendingFollowUp_ && hostNanos() - pendingFollowUp_->sentNs > kOwnSyncWaitNs) {
+                sendFollowUp(pendingFollowUp_->sequence, pendingFollowUp_->fallbackT1);
+            }
         }
     }
+
+    struct PendingFollowUp {
+        uint16_t sequence;
+        uint64_t fallbackT1;  // master time read before sending
+        uint64_t sentNs;
+    };
+    static constexpr uint64_t kOwnSyncWaitNs = 10000000;  // 10 ms
 
     Settings s_;
     PortIdentity identity_;
     Socket send_, multicastEvent_, unicastEvent_;
+    std::optional<PendingFollowUp> pendingFollowUp_;
     uint16_t syncSequence_{0};
     uint16_t announceSequence_{0};
     std::atomic<uint64_t> multicastRequests_{0};
