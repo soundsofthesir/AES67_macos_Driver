@@ -86,8 +86,12 @@ void AES67Device::Initialize() {
     AES67_LOG("AES67Device: Attempting to load saved stream configurations");
     bool loadedSavedStreams = streamManager_->loadSavedStreams();
 
-    // If no saved streams were loaded, create a test RX stream for initial testing
-    if (!loadedSavedStreams) {
+    // With no config file at all, create a test RX stream for initial testing.
+    // A file whose streams didn't load is the user's: adding the test stream
+    // would save over it
+    if (!loadedSavedStreams && streamManager_->foundSavedConfig()) {
+        AES67_LOG("AES67Device: Config found but no stream loaded; not adding the test stream");
+    } else if (!loadedSavedStreams) {
         // Create test RX stream (Network → Core Audio) on channels 0-7
         AES67_LOG("AES67Device: No saved streams found, adding test RX stream (239.1.1.1:5004, 8ch @ 48kHz)");
         SDPSession testSDP;

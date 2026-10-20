@@ -123,6 +123,7 @@ set(NETWORK_SOURCES
     NetworkEngine/StreamChannelMapper.cpp
     NetworkEngine/StreamManager.cpp
     NetworkEngine/StreamConfig.cpp
+    NetworkEngine/Json.cpp
     NetworkEngine/RTP/SimpleRTP.cpp
     NetworkEngine/RTP/RTPReceiver.cpp
     NetworkEngine/RTP/RTPTransmitter.cpp

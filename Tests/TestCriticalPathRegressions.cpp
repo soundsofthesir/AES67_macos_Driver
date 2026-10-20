@@ -39,12 +39,16 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <iostream>
@@ -89,6 +93,16 @@ std::string useEmptyConfig(const std::string& name) {
     const char* tmp = std::getenv("TMPDIR");
     std::string path = std::string(tmp ? tmp : "/tmp/") + "aes67_regression_" + name + ".json";
     std::ofstream(path) << "{\n  \"version\": \"1.0\",\n  \"streams\": [\n  ]\n}\n";
+    setenv("AES67_CONFIG_PATH", path.c_str(), 1);
+    return path;
+}
+
+// Point the driver's config search at a file that doesn't exist: a device
+// then starts with its built-in RX test stream on 239.1.1.1:5004.
+std::string useNoConfig(const std::string& name) {
+    const char* tmp = std::getenv("TMPDIR");
+    std::string path = std::string(tmp ? tmp : "/tmp/") + "aes67_regression_" + name + ".json";
+    std::remove(path.c_str());
     setenv("AES67_CONFIG_PATH", path.c_str(), 1);
     return path;
 }
@@ -304,7 +318,7 @@ void testInputReadsByDeviceTime() {
 // ---------------------------------------------------------------------------
 void testDeviceSampleRate() {
     std::cout << "C2: device nominal sample rate" << std::endl;
-    useEmptyConfig("device");
+    useNoConfig("device");
 
     auto context = std::make_shared<aspl::Context>();
     auto device = std::make_shared<AES67Device>(context);
@@ -392,11 +406,11 @@ void testDeviceClockFromMediaClock() {
 // ---------------------------------------------------------------------------
 void testDeviceClockFollowsReceivedStream() {
     std::cout << "Device clock follows a received stream" << std::endl;
-    useEmptyConfig("recovered");
+    useNoConfig("recovered");
 
     auto context = std::make_shared<aspl::Context>();
     auto device = std::make_shared<AES67Device>(context);
-    device->Initialize();  // empty config: the built-in RX stream on 239.1.1.1:5004, 8 ch
+    device->Initialize();  // no config: the built-in RX stream on 239.1.1.1:5004, 8 ch
     CHECK(device->StartIO(device->GetID(), 0) == kAudioHardwareNoError, "IO should start");
     const double nominal = MediaClock::samplesPerTick(48000.0, 1.0, HostTimebase::current());
 
@@ -456,7 +470,7 @@ void testPtpIsOffByDefault() {
 
 void testPtpTakesTheDeviceClock() {
     std::cout << "PTP on lo0: takes the device clock; a received stream no longer steers it" << std::endl;
-    useEmptyConfig("ptp");  // the built-in RX stream on 239.1.1.1:5004
+    useNoConfig("ptp");  // the built-in RX stream on 239.1.1.1:5004
     usePtpSettings(R"({"enabled": true, "interface": "lo0"})");
     auto context = std::make_shared<aspl::Context>();
     auto device = std::make_shared<AES67Device>(context);
@@ -973,7 +987,7 @@ void testTimelineRestartNeverReusesPositions() {
 // ---------------------------------------------------------------------------
 void testNoDefaultTxStream() {
     std::cout << "No built-in TX stream without a configuration" << std::endl;
-    useEmptyConfig("defaults");
+    useNoConfig("defaults");
     auto context = std::make_shared<aspl::Context>();
     auto device = std::make_shared<AES67Device>(context);
     device->Initialize();
@@ -981,6 +995,313 @@ void testNoDefaultTxStream() {
     CHECK(listener.countPackets(std::chrono::milliseconds(100)) == 0, "nothing should be sent to the old TX test group");
     CHECK(device->GetStreamManager()->getStreamCount() == 1, "only the RX test stream should exist (got "
                                                                   << device->GetStreamManager()->getStreamCount() << ")");
+}
+
+// ---------------------------------------------------------------------------
+// streams.json entries the driver doesn't load (#63, #64, #66) stay in the
+// file: disabled or unreadable entries are written back on every save, and a
+// config whose streams all fail to load is never replaced by the test stream.
+// ---------------------------------------------------------------------------
+std::string savedEntry(const SDPSession& sdp, const ChannelMapping& mapping, bool enabled) {
+    PersistedStreamConfig config = StreamConfigManager::createConfig(sdp, mapping);
+    config.enabled = enabled;
+    return StreamConfigManager::configToJSON(config).dump();
+}
+
+void writeStreamsFile(const std::string& path, const std::vector<std::string>& entries) {
+    std::string json = "{\"version\": \"1.0\", \"streams\": [";
+    for (size_t i = 0; i < entries.size(); ++i) json += (i ? ", " : "") + entries[i];
+    std::ofstream(path) << json << "]}";
+}
+
+// `text` with the first occurrence of `from` replaced by `to`.
+std::string replaced(std::string text, const std::string& from, const std::string& to) {
+    const size_t at = text.find(from);
+    if (at != std::string::npos) text.replace(at, from.size(), to);
+    return text;
+}
+
+std::string readText(const std::string& path) {
+    std::ifstream file(path);
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+void testUnloadedStreamsStayInTheConfig() {
+    std::cout << "#64: disabled and unreadable streams stay in streams.json across saves" << std::endl;
+    const std::string path = useEmptyConfig("keptentries");
+    SDPSession enabledSdp = makeRxSDP("239.69.99.40", 55070, 2);
+    enabledSdp.sessionName = "Enabled One";
+    SDPSession disabledSdp = makeRxSDP("239.69.99.41", 55071, 2);
+    disabledSdp.sessionName = "Disabled One";
+    std::string unreadable = savedEntry(makeRxSDP("239.69.99.42", 55072, 2), makeMapping(2, 4), true);
+    const size_t domain = unreadable.find("\"ptpDomain\": 0");
+    unreadable.replace(domain, std::strlen("\"ptpDomain\": 0"), "\"ptpDomain\": 99999999999");
+    writeStreamsFile(path, {savedEntry(enabledSdp, makeMapping(2, 0), true),
+                            savedEntry(disabledSdp, makeMapping(2, 2), false), unreadable});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    StreamManager manager(harness.context(), txContext, testSap());
+    CHECK(manager.loadSavedStreams(), "the enabled stream should load");
+    CHECK(manager.getStreamCount() == 1, "only the enabled stream should run (got " << manager.getStreamCount() << ")");
+
+    SDPSession added = makeRxSDP("239.69.99.43", 55073, 2);
+    added.sessionName = "Added Later";
+    const StreamID addedID = manager.addStream(added, makeMapping(2, 6));
+    CHECK(!addedID.isNull(), "a stream should be added (and saved)");
+    std::string json = readText(path);
+    CHECK(json.find("Added Later") != std::string::npos && json.find("Enabled One") != std::string::npos,
+          "the running streams should be saved");
+    CHECK(json.find("Disabled One") != std::string::npos, "the disabled stream should survive the save");
+    CHECK(json.find("99999999999") != std::string::npos, "the unreadable entry should survive the save");
+
+    CHECK(manager.removeStream(addedID), "the added stream should be removed (and saved)");
+    json = readText(path);
+    CHECK(json.find("Added Later") == std::string::npos, "the removed stream should be gone from the file");
+    CHECK(json.find("Disabled One") != std::string::npos && json.find("99999999999") != std::string::npos,
+          "the entries not loaded should survive a removal too");
+
+    const auto reloaded = StreamConfigManager::fromJSON(json);
+    size_t disabledCount = 0;
+    for (const auto& entry : reloaded ? *reloaded : std::vector<SavedStreamEntry>{}) {
+        if (entry.config && !entry.config->enabled) ++disabledCount;
+    }
+    CHECK(disabledCount == 1, "the disabled stream should still be disabled");
+}
+
+void testConfigWithNoLoadableStreamIsKept() {
+    std::cout << "#63: a config whose streams don't load is not replaced by the test stream" << std::endl;
+    const std::string path = useEmptyConfig("allunloadable");
+    SDPSession a = makeRxSDP("239.69.99.44", 55074, 2);
+    a.sessionName = "User Stream A";
+    SDPSession b = makeRxSDP("239.69.99.45", 55075, 2);
+    b.sessionName = "User Stream B";
+    writeStreamsFile(path, {savedEntry(a, makeMapping(2, 0), false), savedEntry(b, makeMapping(2, 2), false)});
+    const std::string before = readText(path);
+
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        CHECK(device->GetStreamManager()->getStreamCount() == 0,
+              "no stream should run (got " << device->GetStreamManager()->getStreamCount() << ")");
+    }
+    CHECK(readText(path) == before, "streams.json should be untouched");
+
+    // An empty list is the user's choice too
+    useEmptyConfig("allunloadable");
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        CHECK(device->GetStreamManager()->getStreamCount() == 0, "an empty stream list should stay empty");
+    }
+
+    // A corrupt file is kept for the user to fix, not replaced
+    std::ofstream(path) << "{\"streams\": [";
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        CHECK(device->GetStreamManager()->getStreamCount() == 0, "a corrupt config should not get the test stream");
+    }
+    CHECK(readText(path) == "{\"streams\": [", "the corrupt file should still be there");
+    CHECK(readText(path + ".bak") == "{\"streams\": [", "and copied to .bak");
+    std::remove((path + ".bak").c_str());
+
+    // A file the driver can't read (permissions, sandbox) is still the user's
+    writeStreamsFile(path, {savedEntry(a, makeMapping(2, 0), true)});
+    const std::string locked = readText(path);
+    chmod(path.c_str(), 0000);
+    size_t lockedCount = 0;
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        lockedCount = device->GetStreamManager()->getStreamCount();
+    }
+    chmod(path.c_str(), 0644);
+    if (geteuid() != 0) {
+        CHECK(lockedCount == 0, "an unreadable config should not get the test stream");
+        CHECK(readText(path) == locked, "and should not be saved over");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour changes in the streams.json rework, end to end.
+// ---------------------------------------------------------------------------
+
+// The streams in a saved file, parsed.
+std::vector<SavedStreamEntry> savedEntries(const std::string& path) {
+    auto entries = StreamConfigManager::fromJSON(readText(path));
+    return entries ? *entries : std::vector<SavedStreamEntry>{};
+}
+
+void testConfigPathEnvironmentIsAuthoritative() {
+    std::cout << "AES67_CONFIG_PATH is used even when it doesn't exist and a user config does" << std::endl;
+    const char* tmp = std::getenv("TMPDIR");
+    const std::string home = std::string(tmp ? tmp : "/tmp/") + "aes67_regression_home";
+    std::filesystem::remove_all(home);
+    std::filesystem::create_directories(home + "/Library/Application Support/AES67Driver");
+    const std::string userPath = home + "/Library/Application Support/AES67Driver/streams.json";
+    SDPSession user = makeRxSDP("239.69.99.50", 55080, 2);
+    user.sessionName = "User Config Stream";
+    writeStreamsFile(userPath, {savedEntry(user, makeMapping(2, 0), true)});
+    const std::string userBefore = readText(userPath);
+
+    const char* realHome = std::getenv("HOME");
+    const std::string savedHome = realHome ? realHome : "";
+    setenv("HOME", home.c_str(), 1);
+
+    const std::string envPath = useNoConfig("envpath");
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        const auto streams = device->GetStreamManager()->getActiveStreams();
+        CHECK(streams.size() == 1 && streams[0].name == "Test AES67 Stream",
+              "a missing AES67_CONFIG_PATH file means no config: only the test stream");
+    }
+    CHECK(readText(userPath) == userBefore, "the user's config should be untouched");
+    CHECK(readText(envPath).find("Test AES67 Stream") != std::string::npos, "the test stream should be saved at AES67_CONFIG_PATH");
+
+    // Without the variable the search still finds the user's file
+    unsetenv("AES67_CONFIG_PATH");
+    {
+        auto context = std::make_shared<aspl::Context>();
+        auto device = std::make_shared<AES67Device>(context);
+        device->Initialize();
+        const auto streams = device->GetStreamManager()->getActiveStreams();
+        CHECK(streams.size() == 1 && streams[0].name == "User Config Stream", "the user's config should load");
+    }
+
+    setenv("HOME", savedHome.c_str(), 1);
+    std::filesystem::remove_all(home);
+    std::remove(envPath.c_str());
+}
+
+void testOldFileSurvivesLoadAndSave() {
+    std::cout << "A streams.json from the old writer keeps every field through load and save" << std::endl;
+    const std::string path = useEmptyConfig("upgrade");
+    // As the old writer wrote it: a raw control character in a name, uppercase UUID
+    std::ofstream(path) << R"({
+  "version": "1.0",
+  "streams": [
+    {
+      "enabled": true,
+      "description": "",
+      "createdTimestamp": 1759400000,
+      "modifiedTimestamp": 1759400000,
+      "jitterBufferDepth": 0,
+      "networkInterface": "lo0",
+      "sdp": {
+        "sessionName": "Old)" "\x01" R"(Name [with] {brackets}",
+        "sessionInfo": "Old writer",
+        "sessionID": 18446744073709551615,
+        "sessionVersion": 9007199254740993,
+        "originUsername": "riedel",
+        "originAddress": "192.168.1.20",
+        "connectionAddress": "239.69.99.60",
+        "ttl": 0,
+        "port": 55090,
+        "payloadType": 98,
+        "encoding": "L16",
+        "sampleRate": 48000,
+        "numChannels": 4,
+        "ptime": 0.333,
+        "framecount": 16,
+        "sourceAddress": "192.168.1.20",
+        "ptpDomain": -1,
+        "ptpMasterMAC": "00-1D-C1-FF-FE-12-34-56",
+        "mediaClockType": "direct",
+        "direction": "recvonly"
+      },
+      "mapping": {
+        "streamID": "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "streamName": "Old mapping",
+        "streamChannelCount": 4,
+        "streamChannelOffset": 0,
+        "deviceChannelStart": 20,
+        "deviceChannelCount": 4,
+        "channelMap": [3, 2, 1, 0]
+      }
+    }
+  ]
+})";
+    const auto before = savedEntries(path);
+    CHECK(before.size() == 1 && before[0].config, "the old file should parse");
+    if (before.empty() || !before[0].config) return;
+
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    {
+        StreamManager manager(harness.context(), txContext, testSap());
+        CHECK(manager.loadSavedStreams(), "the old stream should load");
+        CHECK(manager.saveAllStreams(), "and save");
+    }
+    const auto after = savedEntries(path);
+    CHECK(after.size() == 1 && after[0].config, "the saved file should parse");
+    if (after.empty() || !after[0].config) return;
+
+    const JsonValue was = StreamConfigManager::configToJSON(*before[0].config);
+    const JsonValue now = StreamConfigManager::configToJSON(*after[0].config);
+    CHECK(was.find("sdp")->dump() == now.find("sdp")->dump(),
+          "every SDP field should survive\nwas " << was.find("sdp")->dump() << "\nnow " << now.find("sdp")->dump());
+    CHECK(was.find("mapping")->dump() == now.find("mapping")->dump(),
+          "every mapping field should survive\nwas " << was.find("mapping")->dump() << "\nnow " << now.find("mapping")->dump());
+    CHECK(after[0].config->networkInterface == "lo0", "the interface setting should survive");
+    CHECK(after[0].config->sdp.sessionID == UINT64_MAX && after[0].config->sdp.sessionVersion == 9007199254740993ull,
+          "64-bit IDs above 2^53 should be exact");
+}
+
+void testStreamThatFailsToLoadIsKeptEnabled() {
+    std::cout << "A stream that fails to load stays enabled in the file and loads once it can" << std::endl;
+    const std::string path = useEmptyConfig("failedload");
+    SDPSession first = makeRxSDP("239.69.99.61", 55091, 2);
+    first.sessionName = "First";
+    SDPSession clash = makeRxSDP("239.69.99.62", 55092, 2);
+    clash.sessionName = "Clashing";
+    // Both want device channels 0-1: the second can't be mapped
+    const std::string clashing = replaced(savedEntry(clash, makeMapping(2, 0), true), "\"enabled\": true",
+                                          "\"enabled\": true, \"futureField\": {\"x\": [1, 2]}");
+    writeStreamsFile(path, {savedEntry(first, makeMapping(2, 0), true), clashing});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    StreamID firstID;
+    {
+        StreamManager manager(harness.context(), txContext, testSap());
+        CHECK(manager.loadSavedStreams(), "the first stream should load");
+        const auto streams = manager.getActiveStreams();
+        CHECK(streams.size() == 1 && streams[0].name == "First", "only the first stream should run");
+        if (!streams.empty()) firstID = streams[0].id;
+        CHECK(manager.removeStream(firstID), "removing the first stream frees its channels (and saves)");
+    }
+    const auto entries = savedEntries(path);
+    CHECK(entries.size() == 1 && entries[0].config && entries[0].config->enabled &&
+              entries[0].config->sdp.sessionName == "Clashing",
+          "the clashing stream should still be saved, enabled");
+    CHECK(readText(path).find("futureField") != std::string::npos, "with fields this version doesn't know");
+
+    StreamManager reloaded(harness.context(), txContext, testSap());
+    CHECK(reloaded.loadSavedStreams() && reloaded.getStreamCount() == 1, "with its channels free it should load now");
+}
+
+void testDuplicateEntryIsSavedOnce() {
+    std::cout << "A stream listed twice runs once and is saved once" << std::endl;
+    const std::string path = useEmptyConfig("duplicate");
+    const std::string entry = savedEntry(makeRxSDP("239.69.99.63", 55093, 2), makeMapping(2, 0), true);
+    writeStreamsFile(path, {entry, entry});
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    StreamManager manager(harness.context(), txContext, testSap());
+    CHECK(manager.loadSavedStreams() && manager.getStreamCount() == 1, "one copy should run");
+    CHECK(manager.saveAllStreams(), "and save");
+    CHECK(savedEntries(path).size() == 1, "the file should hold it once (holds " << savedEntries(path).size() << ")");
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,6 +1488,12 @@ int main() {
     testTxAnnouncesThePtpGrandmaster();
     testTimelineRestartNeverReusesPositions();
     testNoDefaultTxStream();
+    testUnloadedStreamsStayInTheConfig();
+    testConfigWithNoLoadableStreamIsKept();
+    testConfigPathEnvironmentIsAuthoritative();
+    testOldFileSurvivesLoadAndSave();
+    testStreamThatFailsToLoadIsKeptEnabled();
+    testDuplicateEntryIsSavedOnce();
     testTxStreamSurvivesReload();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();

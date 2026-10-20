@@ -65,11 +65,13 @@ The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 12
 
 Streams are read from `streams.json`, looked for in this order:
 
-1. `$AES67_CONFIG_PATH`
+1. `$AES67_CONFIG_PATH` (if set, only this path is used, even before the file exists)
 2. `~/Library/Application Support/AES67Driver/`
 3. `/Library/Application Support/AES67Driver/`
 
-With no config, the driver creates one test receive stream (239.1.1.1:5004, 8 channels) and no send streams. Each stream can name a network interface (`en0`) or leave it blank to use the main one.
+With no config file, the driver creates one test receive stream (239.1.1.1:5004, 8 channels) and no send streams. A config file with no streams, or none that load, stays as it is. Each stream can name a network interface (`en0`) or leave it blank to use the main one.
+
+Streams marked `"enabled": false`, and entries the driver can't read, are kept in the file when it saves. A file that isn't valid JSON is copied to `streams.json.bak` and left in place.
 
 ## Testing tools
 
