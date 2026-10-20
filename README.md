@@ -56,7 +56,7 @@ Install:
 
 ```bash
 sudo cp -R AES67Driver.driver /Library/Audio/Plug-Ins/HAL/
-sudo launchctl kickstart -k system/com.apple.audio.coreaudiod
+sudo killall coreaudiod
 ```
 
 The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 128 outputs.
