@@ -400,6 +400,11 @@ target_include_directories(TestPtpClockSource PRIVATE
 
 target_compile_features(TestPtpClockSource PRIVATE cxx_std_17)
 
+# PTP test ports on lo0, one pair per binary so ctest -j can run them side by
+# side (Tests/PtpTestMaster.h). CriticalPathRegressions uses 319/320.
+target_compile_definitions(TestPtpTimeReceiver PRIVATE AES67_PTP_TEST_EVENT_PORT=31319)
+target_compile_definitions(TestPtpClockSource PRIVATE AES67_PTP_TEST_EVENT_PORT=31329)
+
 # Add tests to CTest
 enable_testing()
 add_test(NAME ClockRecovery COMMAND TestClockRecovery)

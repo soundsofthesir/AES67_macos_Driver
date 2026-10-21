@@ -36,8 +36,15 @@ namespace PtpTest {
 
 using namespace AES67::Ptp;
 
-inline constexpr uint16_t kEventPort = 31319;
-inline constexpr uint16_t kGeneralPort = 31320;
+// Each test binary with a master and receiver on these ports gets its own
+// pair (AES67_PTP_TEST_EVENT_PORT, set in Tests/CMakeLists.txt): ctest -j runs
+// binaries side by side, and on a shared pair each master counts and answers
+// the other binary's Delay_Req, and its Syncs reach the other's receiver (#79).
+#ifndef AES67_PTP_TEST_EVENT_PORT
+#define AES67_PTP_TEST_EVENT_PORT 31319
+#endif
+inline constexpr uint16_t kEventPort = AES67_PTP_TEST_EVENT_PORT;
+inline constexpr uint16_t kGeneralPort = kEventPort + 1;
 inline constexpr const char* kGroup = "224.0.1.129";
 
 inline uint64_t hostNanos() { return HostTimebase::current().ticksToNanos(hostTimeNow()); }
