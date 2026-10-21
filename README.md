@@ -34,7 +34,6 @@ Next up is PTP, then a signed installer, a Manager app that controls the driver,
 - No PTP yet, so devices that align to PTP time (Dante, RAVENNA) won't play transmitted streams.
 - The driver follows one sender's clock. A second sender on a different clock will drift and occasionally resync until PTP lands.
 - The Manager app doesn't control the driver yet.
-- The driver can't save settings from inside Core Audio; edit `streams.json` instead (see below).
 - Dante only subscribes to multicast in its configured range (default 239.69.x.x). The driver warns about streams outside it.
 - If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`).
 
@@ -75,7 +74,7 @@ Streams are read from `streams.json`, looked for in this order:
 
 With no config file, the driver creates one test receive stream (239.1.1.1:5004, 8 channels) and no send streams. A config file with no streams, or none that load, stays as it is. Each stream can name a network interface (`en0`) or leave it blank to use the main one.
 
-Streams marked `"enabled": false`, and entries the driver can't read, are kept in the file when it saves. A file that isn't valid JSON is copied to `streams.json.bak` and left in place.
+Streams marked `"enabled": false`, and entries the driver can't read, are kept in the file when it saves. They also keep their device channels, so a new stream never lands on a disabled stream's channels and the stream comes back where it was when enabled again. If a running stream and a saved one list the same channels, the running one has them. A file that isn't valid JSON is copied to `streams.json.bak` and left in place.
 
 ## Testing tools
 

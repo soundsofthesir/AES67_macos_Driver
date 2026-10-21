@@ -1348,6 +1348,102 @@ void testStreamsNotLoadedCanBeListedAndRemoved() {
     CHECK(readText(path).find("\"55103\"") != std::string::npos, "the unreadable entry is still kept");
 }
 
+void testSavedStreamsHoldTheirChannels() {
+    std::cout << "Saved streams that aren't running hold their channels" << std::endl;
+    const std::string path = useEmptyConfig("reserve");
+    const auto rx = [](const char* name, const char* group, uint16_t port) {
+        SDPSession sdp = makeRxSDP(group, port, 2);
+        sdp.sessionName = name;
+        return sdp;
+    };
+    // Written before reservations: a disabled stream listing the channels a running one uses
+    const ChannelMapping oldClash = makeMapping(2, 0);
+    const ChannelMapping running = makeMapping(2, 0);
+    const ChannelMapping disabled = makeMapping(2, 2);
+    const ChannelMapping unreadableMapping = makeMapping(2, 4);
+    const ChannelMapping failed = makeMapping(2, 6);
+    const ChannelMapping failedAgain = makeMapping(2, 10);
+    const ChannelMapping disabledTx = makeMapping(2, 0);
+    SDPSession failedSdp = rx("Failed", "239.69.99.84", 55114);
+    failedSdp.sampleRate = 44100;  // the device runs at 48 kHz, so it fails to load
+    SDPSession failedAgainSdp = rx("FailedAgain", "239.69.99.85", 55115);
+    failedAgainSdp.sampleRate = 44100;
+    SDPSession txSdp = rx("DisabledTx", "239.69.99.86", 55116);
+    txSdp.direction = "sendonly";
+    std::string unreadable = savedEntry(rx("Unreadable", "239.69.99.83", 55113), unreadableMapping, true);
+    unreadable = replaced(unreadable, "\"port\": 55113", "\"port\": \"55113\"");
+    writeStreamsFile(path, {savedEntry(rx("OldClash", "239.69.99.80", 55110), oldClash, false),
+                            savedEntry(rx("Running", "239.69.99.81", 55111), running, true),
+                            savedEntry(rx("Disabled", "239.69.99.82", 55112), disabled, false), unreadable,
+                            savedEntry(failedSdp, failed, true), savedEntry(failedAgainSdp, failedAgain, true),
+                            savedEntry(txSdp, disabledTx, false)});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    StreamManager manager(harness.context(), txContext, testSap());
+    CHECK(manager.loadSavedStreams() && manager.getStreamCount() == 1, "only Running should load");
+
+    const auto saved = [&](const std::string& name) {
+        for (const auto& s : manager.getStreamsNotLoaded()) if (s.name == name) return std::optional(s);
+        return std::optional<StreamManager::SavedStreamInfo>();
+    };
+    CHECK(manager.getMapping(running.streamID), "Running keeps its channels over the earlier disabled entry");
+    CHECK(saved("OldClash") && !saved("OldClash")->channelsReserved, "the disabled entry on Running's channels holds none");
+    CHECK(saved("Disabled") && saved("Disabled")->channelsReserved, "a disabled stream holds its channels");
+    CHECK(saved("Failed") && saved("Failed")->channelsReserved, "a stream that failed to load holds its channels");
+    size_t unreadableReserved = 0;
+    for (const auto& s : manager.getStreamsNotLoaded()) {
+        if (!s.readable && s.channelsReserved && s.id == unreadableMapping.streamID && s.deviceChannelStart == 4 &&
+            s.deviceChannelCount == 2) ++unreadableReserved;
+    }
+    CHECK(unreadableReserved == 1, "an unreadable entry with readable channels holds them");
+    CHECK(saved("DisabledTx") && saved("DisabledTx")->channelsReserved &&
+              saved("DisabledTx")->direction == StreamManager::Direction::Transmit,
+          "a disabled TX stream holds output channels");
+    CHECK(manager.getAvailableChannelCount(StreamManager::Direction::Receive) == 118,
+          "inputs held: Running, Disabled, Unreadable, Failed, FailedAgain (free "
+              << manager.getAvailableChannelCount(StreamManager::Direction::Receive) << ")");
+    CHECK(manager.getAvailableChannelCount(StreamManager::Direction::Transmit) == 126, "outputs held: DisabledTx");
+    CHECK(manager.getAllMappings(StreamManager::Direction::Receive).size() == 1 && !manager.getMapping(disabled.streamID),
+          "mapping queries list running streams only");
+
+    // New streams go around held channels
+    const StreamID added = manager.addStream(rx("New", "239.69.99.87", 55117));
+    const auto addedMapping = manager.getMapping(added);
+    CHECK(addedMapping && addedMapping->deviceChannelStart == 8,
+          "a new stream takes the first free block, 8 (got " << (addedMapping ? addedMapping->deviceChannelStart : -1) << ")");
+    CHECK(manager.addStream(rx("OnDisabled", "239.69.99.88", 55118), makeMapping(2, 2)).isNull(),
+          "a new stream can't take a disabled stream's channels");
+
+    // The stream that failed to load, added again, gets its own channels back
+    failedSdp.sampleRate = 48000;
+    CHECK(!manager.addStream(failedSdp, makeMapping(2, 6)).isNull(), "a failed stream re-added takes its saved channels");
+    CHECK(!saved("Failed"), "and replaces its saved copy");
+
+    // A re-add that fails leaves the saved copy holding its channels
+    CHECK(manager.addStream(failedAgainSdp, makeMapping(2, 10)).isNull(), "a re-add at the wrong rate fails");
+    CHECK(saved("FailedAgain") && saved("FailedAgain")->channelsReserved, "and the saved copy holds its channels again");
+    CHECK(manager.addStream(rx("OnFailedAgain", "239.69.99.89", 55119), makeMapping(2, 10)).isNull(),
+          "so another stream still can't take them");
+
+    // Removing a saved stream frees its channels
+    CHECK(manager.removeStream(disabled.streamID), "a disabled stream can be removed");
+    CHECK(!manager.addStream(rx("OnFreed", "239.69.99.88", 55118), makeMapping(2, 2)).isNull(),
+          "and its channels can then be used");
+
+    // Channels a running stream frees go to a saved stream listing them
+    CHECK(manager.removeStream(running.streamID), "Running can be removed");
+    CHECK(saved("OldClash") && saved("OldClash")->channelsReserved, "and the disabled entry on its channels takes them");
+
+    manager.removeAllStreams();
+    CHECK(saved("Unreadable") && saved("Unreadable")->channelsReserved, "removing every running stream keeps saved ones");
+    CHECK(!manager.addStream(rx("OnFree", "239.69.99.91", 55121), makeMapping(2, 20)).isNull(),
+          "free channels can be used after removing every stream");
+    CHECK(manager.addStream(rx("OnUnreadable", "239.69.99.90", 55120), makeMapping(2, 4)).isNull(),
+          "which still hold their channels");
+}
+
 void testDuplicateEntryIsSavedOnce() {
     std::cout << "A stream listed twice runs once and is saved once" << std::endl;
     const std::string path = useEmptyConfig("duplicate");
@@ -1553,6 +1649,7 @@ int main() {
     testStreamThatFailsToLoadIsKeptEnabled();
     testDuplicateEntryIsSavedOnce();
     testStreamsNotLoadedCanBeListedAndRemoved();
+    testSavedStreamsHoldTheirChannels();
     testTxStreamSurvivesReload();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();
