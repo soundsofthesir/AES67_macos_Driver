@@ -33,6 +33,64 @@ StreamID savedStreamID(const SavedStreamEntry& entry) {
     return StreamID(rawText(entry.raw, "mapping", "streamID"));
 }
 
+/// The channels a saved entry holds while it isn't running: its mapping, or
+/// for an entry that couldn't be read as a whole, the ID and channel range
+/// read from its raw JSON. nullopt if the range can't be read; the mapper
+/// rejects the rest (a null ID, a range past the device).
+std::optional<ChannelMapping> keptMapping(const SavedStreamEntry& entry) {
+    if (entry.config) return entry.config->mapping;
+
+    const JsonValue* mapping = entry.raw.find("mapping");
+    const JsonValue* start = mapping ? mapping->find("deviceChannelStart") : nullptr;
+    const JsonValue* count = mapping ? mapping->find("deviceChannelCount") : nullptr;
+    const std::optional<uint64_t> first = start ? start->asUInt64() : std::nullopt;
+    const std::optional<uint64_t> channels = count ? count->asUInt64() : std::nullopt;
+    if (!first || !channels || *first > StreamChannelMapper::kMaxDeviceChannels ||
+        *channels > StreamChannelMapper::kMaxDeviceChannels) {
+        return std::nullopt;
+    }
+
+    ChannelMapping held;
+    held.streamID = savedStreamID(entry);
+    held.streamName = rawText(entry.raw, "sdp", "sessionName");
+    held.deviceChannelStart = static_cast<uint16_t>(*first);
+    held.deviceChannelCount = static_cast<uint16_t>(*channels);
+    held.streamChannelCount = held.deviceChannelCount;
+    return held;
+}
+
+/// A saved entry's direction (an unreadable entry's as written, recvonly
+/// if it has none, as when it is read whole).
+StreamManager::Direction keptDirection(const SavedStreamEntry& entry) {
+    if (entry.config) return StreamManager::directionOf(entry.config->sdp);
+    SDPSession sdp;
+    const std::string direction = rawText(entry.raw, "sdp", "direction");
+    if (!direction.empty()) sdp.direction = direction;
+    return StreamManager::directionOf(sdp);
+}
+
+/// A saved entry, enabled but not loaded, that a new stream on the same
+/// group, port and direction replaces.
+bool isFailedCopyOf(const SavedStreamEntry& entry, const SDPSession& sdp) {
+    if (!entry.config || !entry.config->enabled) return false;
+    const SDPSession& saved = entry.config->sdp;
+    return saved.connectionAddress == sdp.connectionAddress && saved.port == sdp.port &&
+           StreamManager::directionOf(saved) == StreamManager::directionOf(sdp);
+}
+
+/// Calls a function on leaving scope, unless dismissed first.
+class UndoOnExit {
+public:
+    explicit UndoOnExit(std::function<void()> undo) : undo_(std::move(undo)) {}
+    ~UndoOnExit() { if (undo_) undo_(); }
+    UndoOnExit(const UndoOnExit&) = delete;
+    UndoOnExit& operator=(const UndoOnExit&) = delete;
+    void dismiss() { undo_ = nullptr; }
+
+private:
+    std::function<void()> undo_;
+};
+
 } // namespace
 
 StreamManager::StreamManager(RxContext rxContext, TxContext txContext, SAPAnnouncer::Config sapConfig,
@@ -80,6 +138,11 @@ StreamID StreamManager::addStream(const SDPSession& announced, const ChannelMapp
     // on reload, sending to the sender's group
     SDPSession sdp = announced;
     sdp.direction = "recvonly";
+
+    // A saved copy of this stream that failed to load lends it its channels,
+    // and holds them again if this add fails
+    releaseKeptCopiesOf(sdp);
+    UndoOnExit reserveAgain([this] { reserveKeptChannels(); });
 
     // Validate stream can be added
     std::string error;
@@ -185,6 +248,7 @@ StreamID StreamManager::addStream(const SDPSession& announced, const ChannelMapp
     notifyStreamAdded(streams_[id].info);
 
     // Auto-save configuration
+    reserveAgain.dismiss();
     dropKeptCopiesOf(streams_[id].sdp);
     autoSaveIfEnabled();
 
@@ -219,11 +283,13 @@ bool StreamManager::removeStream(const StreamID& id) {
     if (it == streams_.end()) {
         // A saved stream that isn't running: remove it from the file
         const auto kept = std::find_if(keptEntries_.begin(), keptEntries_.end(),
-                                       [&](const SavedStreamEntry& entry) { return savedStreamID(entry) == id; });
+                                       [&](const KeptStream& kept) { return savedStreamID(kept.entry) == id; });
         if (id.isNull() || kept == keptEntries_.end()) {
             return false;
         }
+        releaseKeptChannels(*kept);
         keptEntries_.erase(kept);
+        reserveKeptChannels();
         autoSaveIfEnabled();
         return true;
     }
@@ -240,11 +306,12 @@ bool StreamManager::removeStream(const StreamID& id) {
         announcer_.withdraw(id);
     }
 
-    // Remove from mapper
+    // Remove from mapper; a saved stream may now take the freed channels
     mapperFor(it->second).removeMapping(id);
 
     // Remove from map
     streams_.erase(it);
+    reserveKeptChannels();
 
     // Notify callback
     notifyStreamRemoved(info);
@@ -267,13 +334,14 @@ void StreamManager::removeAllStreams() {
             pair.second.transmitter->stop();
             announcer_.withdraw(pair.first);
         }
+        mapperFor(pair.second).removeMapping(pair.first);
 
         notifyStreamRemoved(pair.second.info);
     }
 
+    // Saved streams not running keep their channels
     streams_.clear();
-    inputMapper_.clearAll();
-    outputMapper_.clearAll();
+    reserveKeptChannels();
 }
 
 //
@@ -326,6 +394,10 @@ StreamID StreamManager::createTxStream(
         AES67_LOGF("StreamManager::createTxStream: %s is outside 239.69.0.0/16; Dante receivers with the default "
                    "AES67 prefix will list '%s' but not subscribe to it", multicastIP.c_str(), name.c_str());
     }
+
+    // As in addStream: a failed saved copy lends its channels until this succeeds
+    releaseKeptCopiesOf(sdp);
+    UndoOnExit reserveAgain([this] { reserveKeptChannels(); });
 
     // Validate
     std::string error;
@@ -397,6 +469,7 @@ StreamID StreamManager::createTxStream(
     notifyStreamAdded(streams_[id].info);
 
     // Auto-save configuration
+    reserveAgain.dismiss();
     dropKeptCopiesOf(streams_[id].sdp);
     autoSaveIfEnabled();
 
@@ -449,8 +522,9 @@ bool StreamManager::updateMapping(const StreamID& id, const ChannelMapping& newM
         return false;
     }
 
-    // Update managed stream
+    // Update managed stream; a saved stream may take the channels it left
     it->second.mapping = completeMapping;
+    reserveKeptChannels();
 
     // Update receiver/transmitter
     bool updated = false;
@@ -472,15 +546,21 @@ bool StreamManager::updateMapping(const StreamID& id, const ChannelMapping& newM
 
 std::optional<ChannelMapping> StreamManager::getMapping(const StreamID& id) const {
     std::lock_guard<std::mutex> lock(streamsMutex_);
-    if (auto mapping = inputMapper_.getMapping(id)) {
-        return mapping;
+    const auto it = streams_.find(id);
+    if (it == streams_.end()) {
+        return std::nullopt;
     }
-    return outputMapper_.getMapping(id);
+    return it->second.mapping;
 }
 
 std::vector<ChannelMapping> StreamManager::getAllMappings(Direction direction) const {
     std::lock_guard<std::mutex> lock(streamsMutex_);
-    return mapperFor(direction).getAllMappings();
+    // The mappers also hold saved streams' channels (getStreamsNotLoaded())
+    std::vector<ChannelMapping> mappings = mapperFor(direction).getAllMappings();
+    mappings.erase(std::remove_if(mappings.begin(), mappings.end(),
+                                  [&](const ChannelMapping& m) { return streams_.count(m.streamID) == 0; }),
+                   mappings.end());
+    return mappings;
 }
 
 //
@@ -864,6 +944,9 @@ bool StreamManager::loadSavedStreams() {
     // Load configurations from disk
     LoadedStreamConfig saved = configManager_->loadConfig();
     savedConfigFound_ = saved.status != LoadedStreamConfig::Status::Missing;
+    for (auto& kept : keptEntries_) {
+        releaseKeptChannels(kept);
+    }
     keptEntries_.clear();
     if (saved.status != LoadedStreamConfig::Status::Loaded) {
         AES67_LOG("StreamManager: No saved stream configurations found");
@@ -880,7 +963,7 @@ bool StreamManager::loadSavedStreams() {
     for (auto& entry : saved.entries) {
         if (!entry.config) {
             AES67_LOG("StreamManager: Keeping an unreadable stream entry as it is");
-            keptEntries_.push_back(std::move(entry));
+            keptEntries_.push_back({std::move(entry)});
             failedCount++;
             continue;
         }
@@ -888,7 +971,7 @@ bool StreamManager::loadSavedStreams() {
         const PersistedStreamConfig& config = *entry.config;
         if (!config.enabled) {
             AES67_LOGF("StreamManager: Skipping disabled stream: %s", config.sdp.sessionName.c_str());
-            keptEntries_.push_back(std::move(entry));
+            keptEntries_.push_back({std::move(entry)});
             continue;
         }
 
@@ -899,7 +982,7 @@ bool StreamManager::loadSavedStreams() {
         }
 
         if (!loadSavedStream(config)) {
-            keptEntries_.push_back(std::move(entry));
+            keptEntries_.push_back({std::move(entry)});
             failedCount++;
             continue;
         }
@@ -912,6 +995,16 @@ bool StreamManager::loadSavedStreams() {
 
     AES67_LOGF("StreamManager: Loaded %d streams successfully, %d failed",
               loadedCount, failedCount);
+
+    // After every enabled stream, so a running stream keeps channels a
+    // disabled one also lists (as files written before reservations can)
+    reserveKeptChannels();
+    for (const auto& kept : keptEntries_) {
+        if (!kept.channelsReserved) {
+            AES67_LOGF("StreamManager: Saved stream '%s' holds no channels: they are in use or unreadable",
+                       rawText(kept.entry.raw, "sdp", "sessionName").c_str());
+        }
+    }
 
     return loadedCount > 0;
 }
@@ -926,17 +1019,20 @@ std::vector<StreamManager::SavedStreamInfo> StreamManager::getStreamsNotLoaded()
 
     std::vector<SavedStreamInfo> result;
     result.reserve(keptEntries_.size());
-    for (const auto& entry : keptEntries_) {
+    for (const auto& kept : keptEntries_) {
+        const SavedStreamEntry& entry = kept.entry;
         SavedStreamInfo info;
         info.id = savedStreamID(entry);
+        info.channelsReserved = kept.channelsReserved;
+        info.direction = keptDirection(entry);
+        if (const auto mapping = keptMapping(entry)) {
+            info.deviceChannelStart = mapping->deviceChannelStart;
+            info.deviceChannelCount = mapping->deviceChannelCount;
+        }
         if (entry.config) {
-            const PersistedStreamConfig& config = *entry.config;
-            info.name = config.sdp.sessionName;
-            info.enabled = config.enabled;
+            info.name = entry.config->sdp.sessionName;
+            info.enabled = entry.config->enabled;
             info.readable = true;
-            info.direction = directionOf(config.sdp);
-            info.deviceChannelStart = config.mapping.deviceChannelStart;
-            info.deviceChannelCount = config.mapping.deviceChannelCount;
         } else {
             info.name = rawText(entry.raw, "sdp", "sessionName");
             const JsonValue* enabled = entry.raw.find("enabled");
@@ -952,20 +1048,48 @@ void StreamManager::dropKeptCopiesOf(const SDPSession& sdp) {
 
     // A saved stream that failed to start, added again: the new one replaces
     // it. Disabled entries stay; they are the user's to remove.
-    const Direction direction = directionOf(sdp);
     keptEntries_.erase(std::remove_if(keptEntries_.begin(), keptEntries_.end(),
-                                      [&](const SavedStreamEntry& entry) {
-                                          if (!entry.config || !entry.config->enabled) return false;
-                                          const SDPSession& saved = entry.config->sdp;
-                                          const bool same = saved.connectionAddress == sdp.connectionAddress &&
-                                                            saved.port == sdp.port && directionOf(saved) == direction;
-                                          if (same) {
-                                              AES67_LOGF("StreamManager: '%s' replaces its saved copy that failed to load",
-                                                         sdp.sessionName.c_str());
-                                          }
-                                          return same;
+                                      [&](KeptStream& kept) {
+                                          if (!isFailedCopyOf(kept.entry, sdp)) return false;
+                                          AES67_LOGF("StreamManager: '%s' replaces its saved copy that failed to load",
+                                                     sdp.sessionName.c_str());
+                                          releaseKeptChannels(kept);
+                                          return true;
                                       }),
                        keptEntries_.end());
+}
+
+void StreamManager::releaseKeptCopiesOf(const SDPSession& sdp) {
+    // NOTE: Caller must hold streamsMutex_ lock
+    for (auto& kept : keptEntries_) {
+        if (isFailedCopyOf(kept.entry, sdp)) {
+            releaseKeptChannels(kept);
+        }
+    }
+}
+
+void StreamManager::releaseKeptChannels(KeptStream& kept) {
+    // NOTE: Caller must hold streamsMutex_ lock
+    if (!kept.channelsReserved) return;
+    mapperFor(keptDirection(kept.entry)).removeMapping(savedStreamID(kept.entry));
+    kept.channelsReserved = false;
+}
+
+void StreamManager::reserveKeptChannels() {
+    // NOTE: Caller must hold streamsMutex_ lock
+
+    // In file order, so of two saved streams on the same channels the
+    // earlier one holds them
+    for (auto& kept : keptEntries_) {
+        if (kept.channelsReserved) continue;
+        const auto mapping = keptMapping(kept.entry);
+        if (!mapping) continue;
+        // The mapper is keyed by ID: never displace a running stream's (or
+        // another entry's) mapping saved under the same ID
+        StreamChannelMapper& mapper = mapperFor(keptDirection(kept.entry));
+        if (mapping->streamID.isNull() || mapper.getMapping(mapping->streamID)) continue;
+        kept.channelsReserved = mapper.addMapping(*mapping);
+    }
 }
 
 bool StreamManager::loadSavedStream(const PersistedStreamConfig& config) {
@@ -1087,7 +1211,7 @@ bool StreamManager::saveAllStreamsInternal() {
     std::vector<JsonValue> kept;
     kept.reserve(keptEntries_.size());
     for (const auto& entry : keptEntries_) {
-        kept.push_back(entry.raw);
+        kept.push_back(entry.entry.raw);
     }
 
     bool success = configManager_->saveConfig(configs, kept);

@@ -135,10 +135,10 @@ public:
     // Update channel mapping for a stream
     bool updateMapping(const StreamID& id, const ChannelMapping& newMapping);
 
-    // Get mapping for a stream
+    /// A running stream's mapping (a saved stream's is in getStreamsNotLoaded()).
     std::optional<ChannelMapping> getMapping(const StreamID& id) const;
 
-    // Get all mappings
+    /// The running streams' mappings in one direction.
     std::vector<ChannelMapping> getAllMappings(Direction direction) const;
 
     //
@@ -191,7 +191,8 @@ public:
     // Get current device sample rate
     double getDeviceSampleRate() const { return currentDeviceSampleRate_; }
 
-    // Get available channel count
+    /// Channels free for a new stream: neither running streams nor saved
+    /// ones (getStreamsNotLoaded()) hold them.
     size_t getAvailableChannelCount(Direction direction) const;
 
     //
@@ -209,14 +210,20 @@ public:
     bool foundSavedConfig() const;
 
     /// A saved stream that isn't running: disabled, failed to start, or
-    /// unreadable. Its channels are not reserved, so another stream may be
-    /// using them. An unreadable entry has whatever could be read (the ID
+    /// unreadable. An unreadable entry has whatever could be read (the ID
     /// may be null).
+    ///
+    /// It holds its channels whenever no running stream uses them, so new
+    /// streams are not placed there. Where channels clash, running streams
+    /// win, then saved ones in file order; channelsReserved says whether this
+    /// one holds its channels now. An entry whose ID or channels can't be
+    /// read holds none.
     struct SavedStreamInfo {
         StreamID id;
         std::string name;
         bool enabled{false};
         bool readable{false};
+        bool channelsReserved{false};
         Direction direction{Direction::Receive};
         uint16_t deviceChannelStart{0};
         uint16_t deviceChannelCount{0};
@@ -298,9 +305,19 @@ private:
     void onInterfaceChanged(const std::string& networkInterface);
 
 
-    // Configuration helpers
-    bool loadSavedStream(const PersistedStreamConfig& config);  // caller holds streamsMutex_
-    void dropKeptCopiesOf(const SDPSession& sdp);                // caller holds streamsMutex_
+    // A saved entry not loaded, and whether its channels are held in its
+    // direction's mapper (under its saved ID)
+    struct KeptStream {
+        SavedStreamEntry entry;
+        bool channelsReserved{false};
+    };
+
+    // Configuration helpers (all: caller holds streamsMutex_)
+    bool loadSavedStream(const PersistedStreamConfig& config);
+    void dropKeptCopiesOf(const SDPSession& sdp);
+    void releaseKeptCopiesOf(const SDPSession& sdp);  // their channels, for the stream replacing them
+    void releaseKeptChannels(KeptStream& kept);
+    void reserveKeptChannels();  // every kept entry whose channels are free takes them
     void autoSaveIfEnabled();
     bool saveAllStreamsInternal();  // Internal version without locking
 
@@ -326,7 +343,7 @@ private:
     // Configuration management
     std::unique_ptr<StreamConfigManager> configManager_;
     bool autoSaveEnabled_{true};
-    std::vector<SavedStreamEntry> keptEntries_;  // saved entries not loaded; guarded by streamsMutex_
+    std::vector<KeptStream> keptEntries_;  // saved entries not loaded, in file order; guarded by streamsMutex_
     bool savedConfigFound_{false};        // guarded by streamsMutex_
 
     // IO lifecycle state — true when Core Audio IO is active (StartIO/StopIO)
