@@ -1290,6 +1290,64 @@ void testStreamThatFailsToLoadIsKeptEnabled() {
     CHECK(reloaded.loadSavedStreams() && reloaded.getStreamCount() == 1, "with its channels free it should load now");
 }
 
+// #76: saved streams that aren't running can be listed and removed, and
+// re-adding one that failed to start replaces it rather than doubling it.
+void testStreamsNotLoadedCanBeListedAndRemoved() {
+    std::cout << "#76: streams not loaded are listed, removable, and replaced when re-added" << std::endl;
+    const std::string path = useEmptyConfig("notloaded");
+    SDPSession running = makeRxSDP("239.69.99.70", 55100, 2);
+    running.sessionName = "Running";
+    SDPSession disabled = makeRxSDP("239.69.99.71", 55101, 2);
+    disabled.sessionName = "Disabled";
+    SDPSession failed = makeRxSDP("239.69.99.72", 55102, 2);
+    failed.sessionName = "Failed";
+    const ChannelMapping disabledMapping = makeMapping(2, 10);
+    const ChannelMapping failedMapping = makeMapping(2, 0);  // clashes with Running
+    std::string unreadable = savedEntry(makeRxSDP("239.69.99.73", 55103, 2), makeMapping(2, 20), true);
+    unreadable = replaced(unreadable, "\"port\": 55103", "\"port\": \"55103\"");
+    writeStreamsFile(path, {savedEntry(running, makeMapping(2, 0), true), savedEntry(disabled, disabledMapping, false),
+                            savedEntry(failed, failedMapping, true), unreadable});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    StreamManager manager(harness.context(), txContext, testSap());
+    CHECK(manager.loadSavedStreams() && manager.getStreamCount() == 1, "only Running should load");
+
+    const auto notLoaded = manager.getStreamsNotLoaded();
+    CHECK(notLoaded.size() == 3, "three saved streams aren't running (got " << notLoaded.size() << ")");
+    const auto find = [&](const std::string& name) -> const StreamManager::SavedStreamInfo* {
+        for (const auto& s : notLoaded) if (s.name == name) return &s;
+        return nullptr;
+    };
+    const auto* d = find("Disabled");
+    CHECK(d && !d->enabled && d->readable && d->id == disabledMapping.streamID &&
+              d->direction == StreamManager::Direction::Receive && d->deviceChannelStart == 10 && d->deviceChannelCount == 2,
+          "the disabled stream is listed with its ID, direction and channels");
+    const auto* f = find("Failed");
+    CHECK(f && f->enabled && f->readable && f->id == failedMapping.streamID, "the stream that failed to load is listed, enabled");
+    size_t unreadableCount = 0;
+    for (const auto& s : notLoaded) if (!s.readable) ++unreadableCount;
+    CHECK(unreadableCount == 1, "the unreadable entry is listed as unreadable");
+
+    // Removing a disabled stream takes it out of the file
+    CHECK(manager.removeStream(disabledMapping.streamID), "a disabled stream can be removed");
+    CHECK(readText(path).find("\"Disabled\"") == std::string::npos, "and is gone from streams.json");
+    CHECK(manager.getStreamsNotLoaded().size() == 2, "and from the list");
+    CHECK(!manager.removeStream(disabledMapping.streamID), "removing it again finds nothing");
+
+    // Re-adding the failed stream (same group, port, direction) replaces its saved copy
+    SDPSession again = failed;
+    const StreamID againID = manager.addStream(again, makeMapping(2, 4));
+    CHECK(!againID.isNull(), "the failed stream can be added again on free channels");
+    size_t failedEntries = 0;
+    for (const auto& entry : savedEntries(path)) {
+        if (entry.config && entry.config->sdp.sessionName == "Failed") ++failedEntries;
+    }
+    CHECK(failedEntries == 1, "streams.json should hold it once (holds " << failedEntries << ")");
+    CHECK(readText(path).find("\"55103\"") != std::string::npos, "the unreadable entry is still kept");
+}
+
 void testDuplicateEntryIsSavedOnce() {
     std::cout << "A stream listed twice runs once and is saved once" << std::endl;
     const std::string path = useEmptyConfig("duplicate");
@@ -1494,6 +1552,7 @@ int main() {
     testOldFileSurvivesLoadAndSave();
     testStreamThatFailsToLoadIsKeptEnabled();
     testDuplicateEntryIsSavedOnce();
+    testStreamsNotLoadedCanBeListedAndRemoved();
     testTxStreamSurvivesReload();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();

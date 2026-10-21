@@ -16,6 +16,25 @@
 
 namespace AES67 {
 
+namespace {
+
+/// A string member of a member of an entry's raw JSON ("" if absent or not a string).
+std::string rawText(const JsonValue& raw, const char* object, const char* key) {
+    const JsonValue* parent = raw.find(object);
+    const JsonValue* value = parent ? parent->find(key) : nullptr;
+    const std::string* text = value ? value->asString() : nullptr;
+    return text ? *text : std::string();
+}
+
+/// A saved entry's ID, read from the raw JSON if the entry couldn't be read
+/// as a whole (null if it has none).
+StreamID savedStreamID(const SavedStreamEntry& entry) {
+    if (entry.config) return entry.config->mapping.streamID;
+    return StreamID(rawText(entry.raw, "mapping", "streamID"));
+}
+
+} // namespace
+
 StreamManager::StreamManager(RxContext rxContext, TxContext txContext, SAPAnnouncer::Config sapConfig,
                              NetworkMonitor::Config networkConfig)
     : rxContext_(rxContext)
@@ -166,6 +185,7 @@ StreamID StreamManager::addStream(const SDPSession& announced, const ChannelMapp
     notifyStreamAdded(streams_[id].info);
 
     // Auto-save configuration
+    dropKeptCopiesOf(streams_[id].sdp);
     autoSaveIfEnabled();
 
     return id;
@@ -197,7 +217,15 @@ bool StreamManager::removeStream(const StreamID& id) {
 
     auto it = streams_.find(id);
     if (it == streams_.end()) {
-        return false;
+        // A saved stream that isn't running: remove it from the file
+        const auto kept = std::find_if(keptEntries_.begin(), keptEntries_.end(),
+                                       [&](const SavedStreamEntry& entry) { return savedStreamID(entry) == id; });
+        if (id.isNull() || kept == keptEntries_.end()) {
+            return false;
+        }
+        keptEntries_.erase(kept);
+        autoSaveIfEnabled();
+        return true;
     }
 
     // Save info for callback before deletion
@@ -369,6 +397,7 @@ StreamID StreamManager::createTxStream(
     notifyStreamAdded(streams_[id].info);
 
     // Auto-save configuration
+    dropKeptCopiesOf(streams_[id].sdp);
     autoSaveIfEnabled();
 
     return id;
@@ -851,7 +880,7 @@ bool StreamManager::loadSavedStreams() {
     for (auto& entry : saved.entries) {
         if (!entry.config) {
             AES67_LOG("StreamManager: Keeping an unreadable stream entry as it is");
-            keptEntries_.push_back(std::move(entry.raw));
+            keptEntries_.push_back(std::move(entry));
             failedCount++;
             continue;
         }
@@ -859,7 +888,7 @@ bool StreamManager::loadSavedStreams() {
         const PersistedStreamConfig& config = *entry.config;
         if (!config.enabled) {
             AES67_LOGF("StreamManager: Skipping disabled stream: %s", config.sdp.sessionName.c_str());
-            keptEntries_.push_back(std::move(entry.raw));
+            keptEntries_.push_back(std::move(entry));
             continue;
         }
 
@@ -870,7 +899,7 @@ bool StreamManager::loadSavedStreams() {
         }
 
         if (!loadSavedStream(config)) {
-            keptEntries_.push_back(std::move(entry.raw));
+            keptEntries_.push_back(std::move(entry));
             failedCount++;
             continue;
         }
@@ -890,6 +919,53 @@ bool StreamManager::loadSavedStreams() {
 bool StreamManager::foundSavedConfig() const {
     std::lock_guard<std::mutex> lock(streamsMutex_);
     return savedConfigFound_;
+}
+
+std::vector<StreamManager::SavedStreamInfo> StreamManager::getStreamsNotLoaded() const {
+    std::lock_guard<std::mutex> lock(streamsMutex_);
+
+    std::vector<SavedStreamInfo> result;
+    result.reserve(keptEntries_.size());
+    for (const auto& entry : keptEntries_) {
+        SavedStreamInfo info;
+        info.id = savedStreamID(entry);
+        if (entry.config) {
+            const PersistedStreamConfig& config = *entry.config;
+            info.name = config.sdp.sessionName;
+            info.enabled = config.enabled;
+            info.readable = true;
+            info.direction = directionOf(config.sdp);
+            info.deviceChannelStart = config.mapping.deviceChannelStart;
+            info.deviceChannelCount = config.mapping.deviceChannelCount;
+        } else {
+            info.name = rawText(entry.raw, "sdp", "sessionName");
+            const JsonValue* enabled = entry.raw.find("enabled");
+            info.enabled = enabled && enabled->asBool().value_or(false);
+        }
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+void StreamManager::dropKeptCopiesOf(const SDPSession& sdp) {
+    // NOTE: Caller must hold streamsMutex_ lock
+
+    // A saved stream that failed to start, added again: the new one replaces
+    // it. Disabled entries stay; they are the user's to remove.
+    const Direction direction = directionOf(sdp);
+    keptEntries_.erase(std::remove_if(keptEntries_.begin(), keptEntries_.end(),
+                                      [&](const SavedStreamEntry& entry) {
+                                          if (!entry.config || !entry.config->enabled) return false;
+                                          const SDPSession& saved = entry.config->sdp;
+                                          const bool same = saved.connectionAddress == sdp.connectionAddress &&
+                                                            saved.port == sdp.port && directionOf(saved) == direction;
+                                          if (same) {
+                                              AES67_LOGF("StreamManager: '%s' replaces its saved copy that failed to load",
+                                                         sdp.sessionName.c_str());
+                                          }
+                                          return same;
+                                      }),
+                       keptEntries_.end());
 }
 
 bool StreamManager::loadSavedStream(const PersistedStreamConfig& config) {
@@ -1008,7 +1084,13 @@ bool StreamManager::saveAllStreamsInternal() {
     }
 
     // Save to disk
-    bool success = configManager_->saveConfig(configs, keptEntries_);
+    std::vector<JsonValue> kept;
+    kept.reserve(keptEntries_.size());
+    for (const auto& entry : keptEntries_) {
+        kept.push_back(entry.raw);
+    }
+
+    bool success = configManager_->saveConfig(configs, kept);
 
     if (success) {
         AES67_LOGF("StreamManager: Saved %zu stream configurations to disk", configs.size());
