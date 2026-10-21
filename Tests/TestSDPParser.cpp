@@ -378,6 +378,50 @@ a=rtpmap:96 L24/48000
     std::cout << "PASSED\n";
 }
 
+// Packet timing is validated however a session was made (#75): a session read
+// from streams.json never went through the a=ptime parser
+void testPacketTimingValidation() {
+    std::cout << "Test: packet timing validation... ";
+
+    auto session = [](double ptime, uint32_t sampleRate, uint32_t framecount) {
+        SDPSession s;
+        s.sessionName = "Timing";
+        s.connectionAddress = "239.69.1.1";
+        s.encoding = "L24";
+        s.sampleRate = sampleRate;
+        s.ptime = ptime;
+        s.framecount = framecount;
+        return s;
+    };
+
+    // The AES67 packet times, at the rates we run
+    assert(session(0.125, 48000, 6).isValid());
+    assert(session(0.333, 48000, 16).isValid());
+    assert(session(1.0, 96000, 96).isValid());
+    assert(session(4.0, 48000, 192).isValid());
+    assert(session(1.0, 192000, 192).isValid());
+    assert(session(1.0, 48000, 0).isValid());  // no a=framecount
+    assert(session(10.0, 48000, 480).isValid());
+
+    // Not a packet time
+    assert(!session(0.0, 48000, 0).isValid());
+    assert(!session(-1.0, 48000, 0).isValid());
+    assert(!session(std::nan(""), 48000, 0).isValid());
+    assert(!session(INFINITY, 48000, 0).isValid());
+    assert(!session(1e300, 48000, 0).isValid());
+
+    // More frames per packet than the receiver takes
+    assert(!session(20.0, 48000, 0).isValid());       // 960 frames
+    assert(!session(4.0, 192000, 0).isValid());       // 768 frames
+    assert(!session(1.0, 48000, 513).isValid());
+    assert(!session(1.0, 48000, 4000000000u).isValid());
+
+    const auto errors = session(0.0, 48000, 0).getValidationErrors();
+    assert(errors.size() == 1 && errors[0].find("ptime") != std::string::npos);
+
+    std::cout << "PASSED\n";
+}
+
 void runAllTests() {
     std::cout << "\n=== AES67 SDP Parser Test Suite ===\n\n";
 
@@ -391,6 +435,7 @@ void runAllTests() {
     testTsRefclkForms();
     testFractionalPtime();
     testRtpmapWithoutChannelCount();
+    testPacketTimingValidation();
     testInvalidSDP();
     testFileOperations();
 

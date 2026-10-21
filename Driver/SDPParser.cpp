@@ -51,6 +51,23 @@ std::vector<std::string> SDPSession::getValidationErrors() const {
         errors.push_back("Channel count must be non-zero");
     }
 
+    // Checked here, not only in the a=ptime parser: sessions also come from
+    // streams.json, and packet buffers are sized from these
+    if (!std::isfinite(ptime) || ptime <= 0.0) {
+        errors.push_back("Packet time (ptime) must be a positive number of milliseconds");
+    } else if (sampleRate > 0) {
+        const double frames = static_cast<double>(sampleRate) * ptime / 1000.0;
+        if (frames < 1.0 || frames >= kMaxFramesPerPacket + 0.5) {
+            errors.push_back("Packet time (ptime) of " + std::to_string(ptime) + " ms is " +
+                             std::to_string(frames) + " frames per packet; must be 1 to " +
+                             std::to_string(kMaxFramesPerPacket));
+        }
+    }
+
+    if (framecount > kMaxFramesPerPacket) {
+        errors.push_back("Frame count must be at most " + std::to_string(kMaxFramesPerPacket));
+    }
+
     return errors;
 }
 

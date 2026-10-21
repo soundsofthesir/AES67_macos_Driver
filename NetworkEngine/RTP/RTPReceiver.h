@@ -88,7 +88,7 @@ public:
     const ChannelMapping& getMapping() const { return mapping_; }
 
 private:
-    static constexpr size_t kMaxFramesPerPacket = 512;
+    static constexpr size_t kMaxFramesPerPacket = AES67::kMaxFramesPerPacket;
 
     void receiveLoop();
     void processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHostTime);

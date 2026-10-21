@@ -323,6 +323,9 @@ void testBadValuesOnlyLoseTheirEntry() {
         {"sdp as an array", replaced(base, "\"sdp\": {", "\"sdp\": [], \"x\": {")},
         {"non-hex stream ID", replaced(base, "\"streamID\": \"", "\"streamID\": \"zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz\", \"x\": \"")},
         {"an entry that isn't an object", "42"},
+        {"ptime 1e300 (#75)", replaced(base, "\"ptime\": 1,", "\"ptime\": 1e300,")},
+        {"ptime 0 (#75)", replaced(base, "\"ptime\": 1,", "\"ptime\": 0,")},
+        {"framecount 4000000000 (#75)", replaced(base, "\"framecount\": 48", "\"framecount\": 4000000000")},
     };
 
     for (const auto& c : cases) {
