@@ -3,8 +3,9 @@
 // AES67 macOS Driver
 // Debug logging to the unified log (os_log).
 //
-// The driver runs sandboxed inside the Core Audio driver host, where writing
-// to a file in /tmp is not permitted, so logs go to the unified log instead:
+// The driver runs sandboxed inside the Core Audio driver host as _coreaudiod.
+// It can write to /tmp (spike S4), but a log file there could already exist
+// under another user, so logs go to the unified log instead:
 //
 //   log show --last 5m --info --predicate 'subsystem == "com.aes67driver"'
 //   log stream --info --predicate 'subsystem == "com.aes67driver"'

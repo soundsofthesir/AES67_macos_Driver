@@ -47,6 +47,22 @@ if(APPLE AND BUILD_SPIKES)
     )
     message(STATUS "  - AES67SandboxProbe (spike S1)")
 
+    # Issue #42: where the driver host lets the driver keep its config (no device, no network)
+    add_library(AES67StorageProbe MODULE StorageProbe/StorageProbe.cpp)
+    target_include_directories(AES67StorageProbe PRIVATE ${ASPL_INCLUDE_DIR})
+    target_compile_features(AES67StorageProbe PRIVATE cxx_std_17)
+    target_link_libraries(AES67StorageProbe PRIVATE
+        ${ASPL_LIBRARY}
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+    )
+    set_target_properties(AES67StorageProbe PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION "driver"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/StorageProbe/Info.plist.in"
+    )
+    message(STATUS "  - AES67StorageProbe (config storage, #42)")
+
     # Spike S2: HAL plug-in whose device clock follows a scheduled clock
     # model, plus a client that measures whether Core Audio obeys it
     add_library(AES67ClockProbe MODULE ClockProbe/ClockProbe.cpp)
