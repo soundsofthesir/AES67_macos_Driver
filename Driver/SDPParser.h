@@ -75,6 +75,10 @@ struct SDPSession {
     std::vector<std::string> getValidationErrors() const;
 };
 
+/// The most frames a packet may carry: what the receiver decodes (4 ms at
+/// 96 kHz, 2 ms at 192 kHz). Sessions asking for more are invalid.
+constexpr uint32_t kMaxFramesPerPacket = 512;
+
 /// Frames in one packet: sample rate x packet time, rounded (333 us at 48 kHz
 /// is 16 frames). Falls back to a=framecount if the packet time is unusable.
 inline uint32_t framesPerPacket(const SDPSession& session) {

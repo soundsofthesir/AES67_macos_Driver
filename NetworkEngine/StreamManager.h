@@ -95,7 +95,7 @@ public:
     /// Import an RX stream from an SDP file on disk.
     StreamID importSDPFile(const std::string& filepath);
 
-    // Remove stream
+    /// Remove a stream, running or only saved (see getStreamsNotLoaded()).
     bool removeStream(const StreamID& id);
 
     // Remove all streams
@@ -208,6 +208,23 @@ public:
     /// with no usable streams (or a corrupt one).
     bool foundSavedConfig() const;
 
+    /// A saved stream that isn't running: disabled, failed to start, or
+    /// unreadable. Its channels are not reserved, so another stream may be
+    /// using them. An unreadable entry has whatever could be read (the ID
+    /// may be null).
+    struct SavedStreamInfo {
+        StreamID id;
+        std::string name;
+        bool enabled{false};
+        bool readable{false};
+        Direction direction{Direction::Receive};
+        uint16_t deviceChannelStart{0};
+        uint16_t deviceChannelCount{0};
+    };
+
+    /// The saved streams that aren't running. removeStream() takes their IDs.
+    std::vector<SavedStreamInfo> getStreamsNotLoaded() const;
+
     /// Persist all current streams to disk.
     bool saveAllStreams();
 
@@ -283,6 +300,7 @@ private:
 
     // Configuration helpers
     bool loadSavedStream(const PersistedStreamConfig& config);  // caller holds streamsMutex_
+    void dropKeptCopiesOf(const SDPSession& sdp);                // caller holds streamsMutex_
     void autoSaveIfEnabled();
     bool saveAllStreamsInternal();  // Internal version without locking
 
@@ -308,7 +326,7 @@ private:
     // Configuration management
     std::unique_ptr<StreamConfigManager> configManager_;
     bool autoSaveEnabled_{true};
-    std::vector<JsonValue> keptEntries_;  // saved entries not loaded; guarded by streamsMutex_
+    std::vector<SavedStreamEntry> keptEntries_;  // saved entries not loaded; guarded by streamsMutex_
     bool savedConfigFound_{false};        // guarded by streamsMutex_
 
     // IO lifecycle state — true when Core Audio IO is active (StartIO/StopIO)

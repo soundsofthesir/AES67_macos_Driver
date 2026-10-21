@@ -20,19 +20,21 @@ DRIVER_PATH="${INSTALL_DIR}/${DRIVER_NAME}"
 
 echo "Configuring AES67 Audio Driver..." | tee -a "$LOG_FILE"
 
-# Create persistent configuration directory
+# Configuration directory. The driver runs as _coreaudiod and saves
+# streams.json by writing a temp file here and renaming it over the old one,
+# so it must own the directory (#42). Set on every install: older installers
+# made it root-owned, and the driver could not save at all.
 CONFIG_DIR="/Library/Application Support/AES67Driver"
 if [ ! -d "$CONFIG_DIR" ]; then
     echo "Creating configuration directory: $CONFIG_DIR" | tee -a "$LOG_FILE"
     mkdir -p "$CONFIG_DIR" || {
         echo "WARNING: Failed to create configuration directory" | tee -a "$LOG_FILE"
     }
-    chmod 755 "$CONFIG_DIR" 2>/dev/null || true
-    chown root:wheel "$CONFIG_DIR" 2>/dev/null || true
-    echo "✓ Configuration directory created" | tee -a "$LOG_FILE"
-else
-    echo "✓ Configuration directory already exists" | tee -a "$LOG_FILE"
 fi
+chown _coreaudiod:wheel "$CONFIG_DIR" && chmod 755 "$CONFIG_DIR" || {
+    echo "WARNING: Failed to give the driver its configuration directory; stream changes won't be saved" | tee -a "$LOG_FILE"
+}
+echo "Configuration directory: $CONFIG_DIR (owner _coreaudiod)" | tee -a "$LOG_FILE"
 
 # Verify the installer copied the driver successfully
 if [ ! -d "$DRIVER_PATH" ]; then

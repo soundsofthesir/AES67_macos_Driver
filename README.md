@@ -56,8 +56,12 @@ Install:
 
 ```bash
 sudo cp -R AES67Driver.driver /Library/Audio/Plug-Ins/HAL/
+sudo mkdir -p "/Library/Application Support/AES67Driver"
+sudo chown _coreaudiod:wheel "/Library/Application Support/AES67Driver"
 sudo launchctl kickstart -k system/com.apple.audio.coreaudiod
 ```
+
+The driver runs as `_coreaudiod` and needs to own its config directory to save stream changes (the installer does this).
 
 The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 128 outputs.
 
@@ -66,7 +70,7 @@ The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 12
 Streams are read from `streams.json`, looked for in this order:
 
 1. `$AES67_CONFIG_PATH` (if set, only this path is used, even before the file exists)
-2. `~/Library/Application Support/AES67Driver/`
+2. `~/Library/Application Support/AES67Driver/` (tests and tools only: the installed driver's home is `/var/empty`)
 3. `/Library/Application Support/AES67Driver/`
 
 With no config file, the driver creates one test receive stream (239.1.1.1:5004, 8 channels) and no send streams. A config file with no streams, or none that load, stays as it is. Each stream can name a network interface (`en0`) or leave it blank to use the main one.
