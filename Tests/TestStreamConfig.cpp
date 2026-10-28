@@ -313,7 +313,6 @@ void testBadValuesOnlyLoseTheirEntry() {
     struct Case { const char* what; std::string entry; };
     const std::vector<Case> cases = {
         {"sessionID 25 digits", replaced(base, "\"sessionID\": 0", "\"sessionID\": 1234567890123456789012345")},
-        {"channelMap [99999999999]", replaced(base, "\"channelMap\": []", "\"channelMap\": [99999999999]")},
         {"ptpDomain 99999999999", replaced(base, "\"ptpDomain\": 0", "\"ptpDomain\": 99999999999")},
         {"port 70000", replaced(base, "\"port\": 55060", "\"port\": 70000")},
         {"ttl 256", replaced(base, "\"ttl\": 0", "\"ttl\": 256")},

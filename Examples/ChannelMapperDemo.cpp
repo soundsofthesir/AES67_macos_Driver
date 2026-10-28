@@ -221,39 +221,6 @@ int main() {
         std::cout << "  SDP files will be available after transfer to macOS\n";
     }
 
-    // Scenario 6: Custom routing
-    std::cout << "\n\n";
-    printSeparator();
-    std::cout << "Scenario 5: Custom channel routing\n";
-    printSeparator();
-
-    StreamChannelMapper customMapper;
-    StreamID customStream = StreamID::generate();
-
-    ChannelMapping customMapping;
-    customMapping.streamID = customStream;
-    customMapping.streamName = "Custom Routing";
-    customMapping.streamChannelCount = 8;
-    customMapping.deviceChannelStart = 100;  // Start at channel 100
-    customMapping.deviceChannelCount = 8;
-
-    // Custom per-channel routing
-    // Stream ch 0,1,2,3 → Device ch 100,101,102,103
-    // Stream ch 4,5,6,7 → Device ch 104,105,106,107
-    customMapping.channelMap = {0, 1, 2, 3, 4, 5, 6, 7};
-
-    std::cout << "\nCreating custom mapping:\n";
-    std::cout << "  Stream: 8 channels\n";
-    std::cout << "  Device: channels 100-107\n";
-
-    std::string error;
-    if (customMapper.validateMapping(customMapping, &error)) {
-        customMapper.addMapping(customMapping);
-        std::cout << "\n✓ Custom mapping created successfully\n";
-    } else {
-        std::cout << "\n❌ Validation failed: " << error << "\n";
-    }
-
     // Summary
     std::cout << "\n\n";
     printSeparator();
@@ -264,7 +231,6 @@ int main() {
     std::cout << "  ✓ Automatic channel allocation\n";
     std::cout << "  ✓ Support for 128 device channels\n";
     std::cout << "  ✓ Multiple simultaneous streams\n";
-    std::cout << "  ✓ Custom per-channel routing\n";
     std::cout << "  ✓ Overlap detection and validation\n";
     std::cout << "  ✓ Integration with SDP parsing\n";
     std::cout << "  ✓ Real-time stream addition/removal\n\n";

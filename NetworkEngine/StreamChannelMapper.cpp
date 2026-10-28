@@ -40,22 +40,12 @@ std::string ChannelMapping::getValidationError() const {
         return "Device channel range exceeds maximum (128 channels)";
     }
 
-    if (!channelMap.empty() && channelMap.size() != streamChannelCount) {
-        return "Custom channel map size doesn't match stream channel count";
-    }
-
     return "";  // Valid
 }
 
 bool ChannelMapping::containsDeviceChannel(int deviceCh) const {
-    if (channelMap.empty()) {
-        // Sequential mapping
-        return deviceCh >= deviceChannelStart &&
-               deviceCh < (deviceChannelStart + deviceChannelCount);
-    } else {
-        // Custom mapping
-        return std::find(channelMap.begin(), channelMap.end(), deviceCh) != channelMap.end();
-    }
+    return deviceCh >= deviceChannelStart &&
+           deviceCh < (deviceChannelStart + deviceChannelCount);
 }
 
 // ============================================================================
@@ -191,7 +181,6 @@ std::optional<ChannelMapping> StreamChannelMapper::createDefaultMapping(
     mapping.streamChannelOffset = 0;
     mapping.deviceChannelStart = *blockStart;
     mapping.deviceChannelCount = numChannels;
-    // channelMap left empty for sequential mapping
 
     return mapping;
 }
@@ -367,19 +356,9 @@ bool StreamChannelMapper::fromJSON(const std::string& json) {
 void StreamChannelMapper::updateDeviceChannelOwners(const ChannelMapping& mapping) {
     // Note: Caller must hold lock
 
-    if (mapping.channelMap.empty()) {
-        // Sequential mapping
-        for (uint16_t i = 0; i < mapping.deviceChannelCount; i++) {
-            int deviceCh = mapping.deviceChannelStart + i;
-            deviceChannelOwners_[deviceCh] = mapping.streamID;
-        }
-    } else {
-        // Custom mapping
-        for (int deviceCh : mapping.channelMap) {
-            if (deviceCh >= 0 && deviceCh < static_cast<int>(kMaxDeviceChannels)) {
-                deviceChannelOwners_[deviceCh] = mapping.streamID;
-            }
-        }
+    for (uint16_t i = 0; i < mapping.deviceChannelCount; i++) {
+        int deviceCh = mapping.deviceChannelStart + i;
+        deviceChannelOwners_[deviceCh] = mapping.streamID;
     }
 }
 

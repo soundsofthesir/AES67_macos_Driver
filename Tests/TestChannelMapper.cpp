@@ -101,33 +101,6 @@ void testChannelExhaustion() {
     std::cout << "✓ PASSED\n";
 }
 
-void testCustomChannelMapping() {
-    std::cout << "Test: Custom Channel Routing... ";
-
-    StreamChannelMapper mapper;
-    StreamID streamID = StreamID::generate();
-
-    ChannelMapping mapping;
-    mapping.streamID = streamID;
-    mapping.streamName = "Custom Routing";
-    mapping.streamChannelCount = 8;
-    mapping.deviceChannelStart = 10;
-    mapping.deviceChannelCount = 8;
-
-    // Custom routing: stream channels [0,2,4,6] → device channels [10,12,14,16]
-    //                 stream channels [1,3,5,7] → device channels [11,13,15,17]
-    mapping.channelMap = {0, 1, 2, 3, 4, 5, 6, 7};  // Identity mapping
-
-    bool added = mapper.addMapping(mapping);
-    assert(added);
-
-    auto retrieved = mapper.getMapping(streamID);
-    assert(retrieved.has_value());
-    assert(retrieved->deviceChannelStart == 10);
-
-    std::cout << "✓ PASSED\n";
-}
-
 void testMappingRemoval() {
     std::cout << "Test: Mapping Removal... ";
 
@@ -316,7 +289,6 @@ void runAllTests() {
     testBasicMapping();
     testMultipleStreams();
     testChannelExhaustion();
-    testCustomChannelMapping();
     testMappingRemoval();
     testMappingValidation();
     testMappingOverlap();
