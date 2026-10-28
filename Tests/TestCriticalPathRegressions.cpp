@@ -696,6 +696,73 @@ void testStreamsRestartWhenTheirInterfaceChanges() {
 }
 
 // ---------------------------------------------------------------------------
+// Restarting the streams on a changed interface used to hold the streams lock
+// for every stream at once, so StartIO waited out all the thread joins (#71).
+// Each stream now restarts under the lock on its own.
+// ---------------------------------------------------------------------------
+void testInterfaceRestartLetsOthersIn() {
+    std::cout << "#71: restarting streams on an interface change doesn't hold the streams lock throughout" << std::endl;
+    useEmptyConfig("ifacelock");
+    std::mutex stateMutex;
+    auto loopback = NetworkInterfaceDetection::currentState("lo0");
+    CHECK(loopback.has_value(), "lo0 should exist");
+    NetworkMonitor::Config network;
+    network.interval = std::chrono::milliseconds(20);
+    network.provider = [&](const std::string& setting) -> std::optional<NetworkInterfaceDetection::InterfaceState> {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        return setting == "lo0" ? loopback : NetworkInterfaceDetection::currentState(setting);
+    };
+
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap(), network);
+    constexpr int kStreams = 16;
+    for (int i = 0; i < kStreams; ++i) {
+        const std::string group = "239.69.99." + std::to_string(120 + i);
+        CHECK(!manager.addStream(makeRxSDP(group.c_str(), static_cast<uint16_t>(55150 + 2 * i), 2),
+                                 makeMapping(2, static_cast<uint16_t>(2 * i)), "lo0").isNull(),
+              "RX stream " << i << " should be added");
+    }
+    manager.setIOActive(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Time a cheap locked call over and over while the streams restart
+    using Clock = std::chrono::steady_clock;
+    std::atomic<bool> probing{true};
+    Clock::duration longestWait{};
+    std::thread probe([&] {
+        while (probing.load()) {
+            const auto start = Clock::now();
+            manager.getStreamCount();
+            longestWait = std::max(longestWait, Clock::now() - start);
+        }
+    });
+    const auto changed = Clock::now();
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        loopback->ipv4 = "127.0.0.2";
+    }
+    // From the first stream restarted to the last: the monitor's polling delay doesn't count
+    std::optional<Clock::time_point> firstRestarted;
+    while (manager.getNetworkRestartCount() < kStreams && Clock::now() - changed < std::chrono::seconds(5)) {
+        if (!firstRestarted && manager.getNetworkRestartCount() > 0) firstRestarted = Clock::now();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    const auto restartTook = Clock::now() - firstRestarted.value_or(changed);
+    probing = false;
+    probe.join();
+    manager.setIOActive(false);
+
+    const auto us = [](Clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+    };
+    CHECK(manager.getNetworkRestartCount() == kStreams, "every stream restarts");
+    CHECK(longestWait * 4 < restartTook, "the longest wait for the lock (" << us(longestWait)
+                                             << " us) is a fraction of the whole restart (" << us(restartTook)
+                                             << " us)");
+}
+
+// ---------------------------------------------------------------------------
 // A fractional packet time (#22) is kept through save and reload, and
 // StreamInfo reports it in microseconds as documented.
 // ---------------------------------------------------------------------------
@@ -1767,6 +1834,7 @@ int main() {
     testInterfaceSettingSurvivesReloadAndSave();
     testFractionalPtimeSurvivesReload();
     testStreamsRestartWhenTheirInterfaceChanges();
+    testInterfaceRestartLetsOthersIn();
     testInputAndOutputChannelsAreSeparate();
     testSenderSdpDirectionDoesNotMakeATransmitter();
     testTxStreamIsAnnounced();

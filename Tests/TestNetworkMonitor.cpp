@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -179,6 +180,35 @@ void testMonitorFollowsAuto() {
     CHECK(log.take() == std::vector<std::string>{""}, "a different primary interface is reported for \"auto\"");
 }
 
+// A handler that throws used to escape the monitor's thread and terminate
+// the driver host (#71). The monitor keeps running and reports the change
+// again on its next poll.
+void testMonitorSurvivesAThrowingHandler() {
+    std::cout << "#71: a handler that throws neither stops the monitor nor loses the change" << std::endl;
+    FakeNetwork network;
+    network.set("en0", state("en0", 4, "10.46.75.146"));
+    ChangeLog log;
+    std::atomic<int> throwsLeft{1};
+    NetworkMonitor::Config config;
+    config.interval = std::chrono::milliseconds(20);
+    config.provider = [&](const std::string& setting) { return network.get(setting); };
+    NetworkMonitor monitor(config, [&](const std::string& setting) {
+        if (throwsLeft.fetch_sub(1) > 0) {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        }
+        log.add(setting);
+    });
+    monitor.watch("en0");
+
+    network.set("en0", state("en0", 4, "10.46.75.200"));
+    settle();
+    CHECK(log.take() == std::vector<std::string>{"en0"}, "the change is reported again once the handler succeeds");
+
+    network.set("en0", state("en0", 4, "10.46.75.201"));
+    settle();
+    CHECK(log.take() == std::vector<std::string>{"en0"}, "and later changes are still reported, once");
+}
+
 void testMonitorStopsPromptly() {
     std::cout << "The monitor stops promptly" << std::endl;
     NetworkMonitor::Config config;
@@ -199,6 +229,7 @@ int main() {
     testCurrentStateIsThreadSafe();
     testMonitorReportsChanges();
     testMonitorFollowsAuto();
+    testMonitorSurvivesAThrowingHandler();
     testMonitorStopsPromptly();
 
     std::cout << "\nNetwork monitor: " << checksPassed << " passed, " << checksFailed << " failed" << std::endl;

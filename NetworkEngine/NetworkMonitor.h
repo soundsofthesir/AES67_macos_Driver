@@ -33,7 +33,8 @@ public:
     };
 
     /// The handler runs on the monitor's thread, without the monitor's lock
-    /// held, so it may call back into code that calls watch().
+    /// held, so it may call back into code that calls watch(). If it throws,
+    /// the change is logged and reported again on the next poll.
     NetworkMonitor(Config config, ChangeHandler handler);
     ~NetworkMonitor();
 
