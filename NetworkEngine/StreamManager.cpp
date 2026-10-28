@@ -12,6 +12,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include <ctime>
 
 namespace AES67 {
@@ -873,12 +874,37 @@ std::optional<StreamManager::PtpGrandmaster> StreamManager::ptpGrandmaster() con
     return ptpGrandmaster_;
 }
 
+namespace {
+// Between streams restarted on an interface change: long enough for a thread
+// woken on the streams lock to take it
+constexpr auto kInterfaceRestartPause = std::chrono::microseconds(500);
+}
+
 void StreamManager::onInterfaceChanged(const std::string& networkInterface) {
-    std::lock_guard<std::mutex> lock(streamsMutex_);
-    for (auto& [id, managed] : streams_) {
-        if (managed.networkInterface != networkInterface) {
-            continue;
+    std::vector<StreamID> affected;
+    {
+        std::lock_guard<std::mutex> lock(streamsMutex_);
+        for (const auto& [id, managed] : streams_) {
+            if (managed.networkInterface == networkInterface) {
+                affected.push_back(id);
+            }
         }
+    }
+
+    // One stream at a time under the lock, so StartIO and the rest wait for
+    // one stream's thread joins at most, not every stream's (#71). The mutex
+    // isn't fair: without a pause between streams this thread takes it back
+    // before a woken waiter runs
+    bool first = true;
+    for (const StreamID& id : affected) {
+        if (!first) std::this_thread::sleep_for(kInterfaceRestartPause);
+        first = false;
+        std::lock_guard<std::mutex> lock(streamsMutex_);
+        auto it = streams_.find(id);
+        if (it == streams_.end() || it->second.networkInterface != networkInterface) {
+            continue;  // removed or moved meanwhile
+        }
+        ManagedStream& managed = it->second;
         // Rejoin (a fresh IGMP report, so switches forward at once) and
         // resend on the interface as it is now
         if (managed.receiver && ioActive_.load()) {

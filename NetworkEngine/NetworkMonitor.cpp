@@ -1,6 +1,9 @@
 /// @file NetworkMonitor.cpp
 
 #include "NetworkMonitor.h"
+#include "../Driver/DebugLog.h"
+#include <algorithm>
+#include <exception>
 #include <utility>
 #include <vector>
 
@@ -36,6 +39,7 @@ void NetworkMonitor::watch(const std::string& setting) {
 }
 
 void NetworkMonitor::run() {
+    std::vector<std::string> failed;  // changes whose handler threw, reported again
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopping_) {
         wake_.wait_for(lock, config_.interval, [this] { return stopping_; });
@@ -55,19 +59,31 @@ void NetworkMonitor::run() {
         }
         lock.lock();
 
-        std::vector<std::string> changed;
+        std::vector<std::string> changed = std::move(failed);
+        failed.clear();
         for (auto& [setting, state] : current) {
             auto it = watched_.find(setting);
             if (it != watched_.end() && it->second != state) {
                 it->second = std::move(state);
-                changed.push_back(setting);
+                if (std::find(changed.begin(), changed.end(), setting) == changed.end()) {
+                    changed.push_back(setting);
+                }
             }
         }
 
-        // Report without the lock: the handler may call watch()
+        // Report without the lock: the handler may call watch(). An exception
+        // escaping this thread would terminate the driver host (#71)
         lock.unlock();
         for (const auto& setting : changed) {
-            handler_(setting);
+            try {
+                handler_(setting);
+            } catch (const std::exception& e) {
+                AES67_LOGF("NetworkMonitor: handling a change of '%s' failed (%s); retrying", setting.c_str(), e.what());
+                failed.push_back(setting);
+            } catch (...) {
+                AES67_LOGF("NetworkMonitor: handling a change of '%s' failed; retrying", setting.c_str());
+                failed.push_back(setting);
+            }
         }
         lock.lock();
     }
