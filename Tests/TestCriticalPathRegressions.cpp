@@ -1223,8 +1223,7 @@ void testOldFileSurvivesLoadAndSave() {
         "streamChannelCount": 4,
         "streamChannelOffset": 0,
         "deviceChannelStart": 20,
-        "deviceChannelCount": 4,
-        "channelMap": [3, 2, 1, 0]
+        "deviceChannelCount": 4
       }
     }
   ]
@@ -1444,6 +1443,138 @@ void testSavedStreamsHoldTheirChannels() {
           "which still hold their channels");
 }
 
+// ---------------------------------------------------------------------------
+// A stream's mapping covers all of its channels, whatever count a caller or
+// the file gives (#69); a mapping that is refused changes nothing (#70); and
+// channelMap, which never routed anything, no longer decides ownership (#68).
+// ---------------------------------------------------------------------------
+using Routes = std::vector<std::pair<uint32_t, uint32_t>>;
+
+// The device channels receivers publish to, as {start, count}, sorted.
+Routes liveRoutes(const RxHarness& harness) {
+    Routes routes;
+    harness.routing.read([&](const RxRouting::Route& route) {
+        routes.emplace_back(route.deviceChannelStart, static_cast<uint32_t>(route.buffer->channels()));
+    });
+    std::sort(routes.begin(), routes.end());
+    return routes;
+}
+
+SDPSession namedRx(const char* name, const char* group, uint16_t port, uint16_t channels) {
+    SDPSession sdp = makeRxSDP(group, port, channels);
+    sdp.sessionName = name;
+    return sdp;
+}
+
+void testMappingCoversTheWholeStream() {
+    std::cout << "#69, #70: a new mapping covers the whole stream, and a refused one changes nothing" << std::endl;
+    const std::string path = useEmptyConfig("fullmapping");
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    manager.setIOActive(true);
+    using Direction = StreamManager::Direction;
+
+    const StreamID a = manager.addStream(namedRx("A", "239.69.99.100", 55130, 8), makeMapping(8, 0));
+    const StreamID b = manager.addStream(namedRx("B", "239.69.99.101", 55131, 8));
+    CHECK(!a.isNull() && !b.isNull(), "A and B should be added");
+
+    // #69: a mapping that asks for 1 channel still reserves all 8 the stream publishes
+    CHECK(manager.updateMapping(b, makeMapping(1, 120)), "B should move to 120");
+    const auto moved = manager.getMapping(b);
+    CHECK(moved && moved->deviceChannelStart == 120 && moved->deviceChannelCount == 8 &&
+              moved->streamChannelCount == 8,
+          "B holds 120-127 (got " << (moved ? moved->deviceChannelStart : -1) << " x "
+                                  << (moved ? moved->deviceChannelCount : -1) << ")");
+    CHECK(manager.addStream(namedRx("C", "239.69.99.102", 55132, 4), makeMapping(4, 124)).isNull(),
+          "a stream on 124-127 is refused: B uses them");
+    CHECK(manager.getAvailableChannelCount(Direction::Receive) == 112,
+          "16 inputs in use (free " << manager.getAvailableChannelCount(Direction::Receive) << ")");
+    CHECK(liveRoutes(harness) == (Routes{{0, 8}, {120, 8}}), "A routes 0-7, B 120-127");
+
+    // #70: 8 channels at 121 don't fit; nothing changes
+    CHECK(!manager.updateMapping(b, makeMapping(1, 121)), "B can't move to 121");
+    const auto kept = manager.getMapping(b);
+    CHECK(kept && kept->deviceChannelStart == 120 && kept->deviceChannelCount == 8, "B's mapping stays 120-127");
+    CHECK(manager.addStream(namedRx("D", "239.69.99.103", 55133, 1), makeMapping(1, 120)).isNull(),
+          "120 is still B's");
+    CHECK(liveRoutes(harness) == (Routes{{0, 8}, {120, 8}}), "B still routes 120-127");
+    CHECK(manager.saveAllStreams(), "streams should save");
+    bool savedAt120 = false;
+    for (const auto& entry : savedEntries(path)) {
+        if (entry.config && entry.config->mapping.streamID == b) {
+            savedAt120 = entry.config->mapping.deviceChannelStart == 120 &&
+                         entry.config->mapping.deviceChannelCount == 8;
+        }
+    }
+    CHECK(savedAt120, "B is saved at 120-127");
+
+    // The same for a transmitter, whose mapping the transmitter itself used to refuse
+    const StreamID tx = manager.createTxStream("Mapping TX", "239.69.99.104", 55134, 2, makeMapping(2, 0), kHostOnly);
+    CHECK(!tx.isNull(), "TX should be created");
+    CHECK(!manager.updateMapping(tx, makeMapping(1, 127)), "2 output channels at 127 don't fit");
+    const auto txKept = manager.getMapping(tx);
+    CHECK(txKept && txKept->deviceChannelStart == 0 && txKept->deviceChannelCount == 2, "TX's mapping stays 0-1");
+    CHECK(manager.getAvailableChannelCount(Direction::Transmit) == 126, "TX holds 2 outputs");
+}
+
+void testSavedMappingCoversTheWholeStream() {
+    std::cout << "#69: a saved mapping covers the whole stream, whatever count the file gives" << std::endl;
+    const std::string path = useEmptyConfig("savedfullmapping");
+    const auto narrowEntry = [](const SDPSession& sdp, uint16_t start) {
+        ChannelMapping mapping = makeMapping(8, start);
+        mapping.deviceChannelCount = 1;
+        mapping.streamChannelCount = 1;
+        return savedEntry(sdp, mapping, true);
+    };
+    writeStreamsFile(path, {narrowEntry(namedRx("Fits", "239.69.99.105", 55135, 8), 0),
+                            narrowEntry(namedRx("PastTheEnd", "239.69.99.106", 55136, 8), 121)});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    CHECK(manager.loadSavedStreams() && manager.getStreamCount() == 1, "only Fits should load");
+    manager.setIOActive(true);
+
+    const auto mappings = manager.getAllMappings(StreamManager::Direction::Receive);
+    CHECK(mappings.size() == 1 && mappings[0].deviceChannelStart == 0 && mappings[0].deviceChannelCount == 8,
+          "Fits holds 0-7");
+    CHECK(manager.addStream(namedRx("OnFits", "239.69.99.107", 55137, 2), makeMapping(2, 4)).isNull(),
+          "a stream on 4-5 is refused: Fits uses them");
+    CHECK(liveRoutes(harness) == (Routes{{0, 8}}), "only Fits routes");
+
+    bool pastTheEndHoldsNothing = false;
+    for (const auto& saved : manager.getStreamsNotLoaded()) {
+        if (saved.name == "PastTheEnd") {
+            pastTheEndHoldsNothing = !saved.channelsReserved && saved.deviceChannelCount == 8;
+        }
+    }
+    CHECK(pastTheEndHoldsNothing, "PastTheEnd, 8 channels at 121, isn't loaded and holds no channels");
+    CHECK(!manager.addStream(namedRx("OnPastTheEnd", "239.69.99.108", 55138, 1), makeMapping(1, 121)).isNull(),
+          "so 121 is free");
+}
+
+void testChannelMapIsIgnored() {
+    std::cout << "#68: an old channelMap is ignored and dropped on save" << std::endl;
+    const std::string path = useEmptyConfig("channelmap");
+    const std::string entry = savedEntry(namedRx("Mapped", "239.69.99.109", 55139, 2), makeMapping(2, 0), true);
+    const std::string withMap =
+        replaced(entry, "\"deviceChannelCount\": 2", "\"deviceChannelCount\": 2, \"channelMap\": [10, 11]");
+    CHECK(withMap != entry, "the test should have added a channelMap");
+    writeStreamsFile(path, {withMap});
+
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    CHECK(manager.loadSavedStreams() && manager.getStreamCount() == 1, "the stream should load");
+    CHECK(manager.addStream(namedRx("On0", "239.69.99.110", 55140, 2), makeMapping(2, 0)).isNull(),
+          "0-1, where the stream routes, are taken");
+    CHECK(!manager.addStream(namedRx("On10", "239.69.99.111", 55141, 2), makeMapping(2, 10)).isNull(),
+          "10-11, from the channelMap, are free");
+    CHECK(manager.saveAllStreams(), "streams should save");
+    CHECK(readText(path).find("channelMap") == std::string::npos, "the saved file has no channelMap");
+}
+
 void testDuplicateEntryIsSavedOnce() {
     std::cout << "A stream listed twice runs once and is saved once" << std::endl;
     const std::string path = useEmptyConfig("duplicate");
@@ -1650,6 +1781,9 @@ int main() {
     testDuplicateEntryIsSavedOnce();
     testStreamsNotLoadedCanBeListedAndRemoved();
     testSavedStreamsHoldTheirChannels();
+    testMappingCoversTheWholeStream();
+    testSavedMappingCoversTheWholeStream();
+    testChannelMapIsIgnored();
     testTxStreamSurvivesReload();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();

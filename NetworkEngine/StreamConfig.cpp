@@ -334,19 +334,13 @@ JsonValue StreamConfigManager::sdpToJSON(const SDPSession& sdp) {
 }
 
 JsonValue StreamConfigManager::mappingToJSON(const ChannelMapping& mapping) {
-    JsonValue channelMap = JsonValue::array();
-    for (int channel : mapping.channelMap) {
-        channelMap.push(JsonValue::number(channel));
-    }
-
     return JsonValue::object()
         .add("streamID", JsonValue::string(mapping.streamID.toString()))
         .add("streamName", JsonValue::string(mapping.streamName))
         .add("streamChannelCount", JsonValue::number(static_cast<uint64_t>(mapping.streamChannelCount)))
         .add("streamChannelOffset", JsonValue::number(static_cast<uint64_t>(mapping.streamChannelOffset)))
         .add("deviceChannelStart", JsonValue::number(static_cast<uint64_t>(mapping.deviceChannelStart)))
-        .add("deviceChannelCount", JsonValue::number(static_cast<uint64_t>(mapping.deviceChannelCount)))
-        .add("channelMap", std::move(channelMap));
+        .add("deviceChannelCount", JsonValue::number(static_cast<uint64_t>(mapping.deviceChannelCount)));
 }
 
 // ============================================================================
@@ -405,20 +399,6 @@ public:
         out = *b;
     }
 
-    void intArray(const char* key, std::vector<int>& out) {
-        const JsonValue* value = object_.find(key);
-        if (!value) return;
-        const JsonValue::Array* items = value->asArray();
-        if (!items) return fail(key);
-        std::vector<int> result;
-        for (const auto& item : *items) {
-            const auto n = item.asInt64();
-            if (!n || *n < std::numeric_limits<int>::min() || *n > std::numeric_limits<int>::max()) return fail(key);
-            result.push_back(static_cast<int>(*n));
-        }
-        out = std::move(result);
-    }
-
     /// A nested object, or nullptr (and unreadable) if it is something else.
     const JsonValue* object(const char* key) {
         const JsonValue* value = object_.find(key);
@@ -473,7 +453,6 @@ bool readMapping(const JsonValue& json, ChannelMapping& mapping) {
     r.unsignedInt("streamChannelOffset", mapping.streamChannelOffset);
     r.unsignedInt("deviceChannelStart", mapping.deviceChannelStart);
     r.unsignedInt("deviceChannelCount", mapping.deviceChannelCount);
-    r.intArray("channelMap", mapping.channelMap);
     return r.ok();
 }
 

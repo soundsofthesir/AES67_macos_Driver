@@ -33,12 +33,21 @@ StreamID savedStreamID(const SavedStreamEntry& entry) {
     return StreamID(rawText(entry.raw, "mapping", "streamID"));
 }
 
+/// `mapping` for a stream of `numChannels` channels, covering all of them:
+/// its receiver or transmitter routes every channel, whatever count the
+/// caller or the file gives (#69).
+ChannelMapping wholeStreamMapping(ChannelMapping mapping, uint16_t numChannels) {
+    mapping.streamChannelCount = numChannels;
+    mapping.deviceChannelCount = numChannels;
+    return mapping;
+}
+
 /// The channels a saved entry holds while it isn't running: its mapping, or
 /// for an entry that couldn't be read as a whole, the ID and channel range
 /// read from its raw JSON. nullopt if the range can't be read; the mapper
 /// rejects the rest (a null ID, a range past the device).
 std::optional<ChannelMapping> keptMapping(const SavedStreamEntry& entry) {
-    if (entry.config) return entry.config->mapping;
+    if (entry.config) return wholeStreamMapping(entry.config->mapping, entry.config->sdp.numChannels);
 
     const JsonValue* mapping = entry.raw.find("mapping");
     const JsonValue* start = mapping ? mapping->find("deviceChannelStart") : nullptr;
@@ -163,11 +172,9 @@ StreamID StreamManager::addStream(const SDPSession& announced, const ChannelMapp
     }
 
     // Create complete mapping with stream ID
-    ChannelMapping completeMapping = mapping;
+    ChannelMapping completeMapping = wholeStreamMapping(mapping, sdp.numChannels);
     completeMapping.streamID = id;
     completeMapping.streamName = sdp.sessionName;
-    completeMapping.streamChannelCount = sdp.numChannels;
-    completeMapping.deviceChannelCount = sdp.numChannels;
 
     // Add mapping to mapper
     if (!inputMapper_.addMapping(completeMapping)) {
@@ -411,11 +418,9 @@ StreamID StreamManager::createTxStream(
     StreamID id = StreamID::generate();
 
     // Create complete mapping with stream ID
-    ChannelMapping completeMapping = mapping;
+    ChannelMapping completeMapping = wholeStreamMapping(mapping, numChannels);
     completeMapping.streamID = id;
     completeMapping.streamName = name;
-    completeMapping.streamChannelCount = numChannels;
-    completeMapping.deviceChannelCount = numChannels;
 
     // Add mapping
     if (!outputMapper_.addMapping(completeMapping)) {
@@ -511,37 +516,48 @@ bool StreamManager::updateMapping(const StreamID& id, const ChannelMapping& newM
     if (it == streams_.end()) {
         return false;
     }
-
-    // Update mapper
-    ChannelMapping completeMapping = newMapping;
-    completeMapping.streamID = id;
-    completeMapping.streamName = it->second.mapping.streamName;
-    completeMapping.streamChannelCount = it->second.sdp.numChannels;
-
-    if (!mapperFor(it->second).updateMapping(completeMapping)) {
+    ManagedStream& managed = it->second;
+    if (!managed.receiver && !managed.transmitter) {
         return false;
     }
 
-    // Update managed stream; a saved stream may take the channels it left
-    it->second.mapping = completeMapping;
+    const ChannelMapping previous = managed.mapping;
+    ChannelMapping completeMapping = wholeStreamMapping(newMapping, managed.sdp.numChannels);
+    completeMapping.streamID = id;
+    completeMapping.streamName = previous.streamName;
+
+    StreamChannelMapper& mapper = mapperFor(managed);
+    if (!mapper.updateMapping(completeMapping)) {
+        return false;
+    }
+
+    // Move the receiver or transmitter, running again afterwards if it ran before
+    const bool wasRunning = managed.receiver ? managed.receiver->isRunning() : managed.transmitter->isRunning();
+    const auto routeTo = [&managed, wasRunning](const ChannelMapping& mapping) {
+        const auto route = [&](auto& endpoint) {
+            return endpoint.updateMapping(mapping) && (!wasRunning || endpoint.isRunning() || endpoint.start());
+        };
+        return managed.receiver ? route(*managed.receiver) : route(*managed.transmitter);
+    };
+
+    if (!routeTo(completeMapping)) {
+        // Nothing has taken the old channels while we hold the lock: put the stream back on them (#70)
+        mapper.updateMapping(previous);
+        if (!routeTo(previous)) {
+            AES67_LOGF("StreamManager::updateMapping: '%s' could not restart on its old channels",
+                       previous.streamName.c_str());
+        }
+        return false;
+    }
+
+    // A saved stream may take the channels it left
+    managed.mapping = completeMapping;
     reserveKeptChannels();
+    notifyStreamStatusChanged(managed.info);
 
-    // Update receiver/transmitter
-    bool updated = false;
-    if (it->second.receiver) {
-        updated = it->second.receiver->updateMapping(completeMapping);
-    } else if (it->second.transmitter) {
-        updated = it->second.transmitter->updateMapping(completeMapping);
-    }
-
-    if (updated) {
-        notifyStreamStatusChanged(it->second.info);
-
-        // Auto-save configuration
-        autoSaveIfEnabled();
-    }
-
-    return updated;
+    // Auto-save configuration
+    autoSaveIfEnabled();
+    return true;
 }
 
 std::optional<ChannelMapping> StreamManager::getMapping(const StreamID& id) const {
@@ -643,8 +659,9 @@ void StreamManager::setIOActive(bool active) {
     if (active) {
         AES67_LOGF("StreamManager::setIOActive: Starting receivers (%zu stream(s))", streams_.size());
         for (auto& [id, managed] : streams_) {
-            if (managed.receiver) {
-                managed.receiver->start();
+            if (managed.receiver && !managed.receiver->start()) {
+                AES67_LOGF("StreamManager::setIOActive: failed to start the receiver for '%s'",
+                           managed.sdp.sessionName.c_str());
             }
         }
     } else {
@@ -1110,11 +1127,12 @@ bool StreamManager::loadSavedStream(const PersistedStreamConfig& config) {
     }
 
     // Use the StreamID from the saved mapping
-    const StreamID id = config.mapping.streamID;
+    const ChannelMapping mapping = wholeStreamMapping(config.mapping, config.sdp.numChannels);
+    const StreamID id = mapping.streamID;
 
     // Add mapping to mapper
     StreamChannelMapper& mapper = mapperFor(directionOf(config.sdp));
-    if (!mapper.addMapping(config.mapping)) {
+    if (!mapper.addMapping(mapping)) {
         AES67_LOGF("StreamManager: Failed to add mapping for stream: %s",
                   config.sdp.sessionName.c_str());
         return false;
@@ -1123,19 +1141,19 @@ bool StreamManager::loadSavedStream(const PersistedStreamConfig& config) {
     // Create managed stream
     ManagedStream managed;
     managed.sdp = config.sdp;
-    managed.mapping = config.mapping;
+    managed.mapping = mapping;
     managed.isTransmit = (config.sdp.direction == "sendonly" || config.sdp.direction == "sendrecv");
     managed.networkInterface = config.networkInterface;
 
     // Transmitters start now; receivers start only if IO is active
     if (managed.isTransmit) {
-        managed.transmitter = createTransmitter(config.sdp, config.mapping, config.networkInterface);
+        managed.transmitter = createTransmitter(config.sdp, mapping, config.networkInterface);
         if (!managed.transmitter || !managed.transmitter->start()) {
             mapper.removeMapping(id);
             return false;
         }
     } else {
-        managed.receiver = createReceiver(config.sdp, config.mapping, config.jitterBufferDepth, config.networkInterface);
+        managed.receiver = createReceiver(config.sdp, mapping, config.jitterBufferDepth, config.networkInterface);
         if (!managed.receiver || (ioActive_.load() && !managed.receiver->start())) {
             mapper.removeMapping(id);
             return false;

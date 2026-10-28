@@ -13,8 +13,8 @@
 
 namespace AES67 {
 
-/// Defines how channels from an AES67 stream map to device channels.
-/// Supports sequential mapping with offsets or per-channel custom routing.
+/// Defines how channels from an AES67 stream map to device channels: stream
+/// channel i goes to device channel deviceChannelStart + i.
 struct ChannelMapping {
     // Stream identification
     StreamID streamID;
@@ -25,9 +25,6 @@ struct ChannelMapping {
 
     uint16_t deviceChannelStart{0};      ///< First device channel (0-127)
     uint16_t deviceChannelCount{0};      ///< Number of channels to map
-
-    /// Per-channel custom routing. If empty, sequential: streamCh[i] -> deviceCh[start+i].
-    std::vector<int> channelMap;
 
     // Validation
     bool isValid() const;
