@@ -22,7 +22,8 @@ struct Candidate {
 /// masters announcing on our domain, qualifies each once it has announced
 /// often enough (so one stray Announce cannot take over), compares their
 /// datasets in the standard's order, and drops a master that falls silent
-/// for announceReceiptTimeout of its own announce intervals.
+/// for announceReceiptTimeout of its own announce intervals. Announces with
+/// an interval outside 1/8 s to 16 s are ignored.
 ///
 /// Time is passed in, in seconds, so it is deterministic. Not thread-safe.
 class BestMaster {

@@ -7,6 +7,16 @@
 namespace AES67 {
 namespace Ptp {
 
+namespace {
+
+// Announce intervals we follow: 1/8 s (SMPTE ST 2059-2's fastest) to 16 s
+// (the slowest in the default and AES67 media profiles). Outside this, the
+// receipt timeout and qualification window are meaningless.
+constexpr int8_t kMinLogAnnounceInterval = -3;
+constexpr int8_t kMaxLogAnnounceInterval = 4;
+
+} // namespace
+
 BestMaster::BestMaster(Config config) : config_(std::move(config)) {}
 
 double BestMaster::intervalOf(const Candidate& candidate) {
@@ -51,7 +61,8 @@ bool BestMaster::onAnnounce(const Message& message, double now) {
         return false;
     }
     if (message.header.domain != config_.domain || message.header.source.clock == config_.self ||
-        message.announce->stepsRemoved >= 255) {
+        message.announce->stepsRemoved >= 255 || message.header.logMessageInterval < kMinLogAnnounceInterval ||
+        message.header.logMessageInterval > kMaxLogAnnounceInterval) {
         return false;
     }
 

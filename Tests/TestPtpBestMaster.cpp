@@ -7,6 +7,7 @@
 //
 
 #include "../NetworkEngine/PTP/PtpBestMaster.h"
+#include <cmath>
 #include <iostream>
 
 using namespace AES67::Ptp;
@@ -181,6 +182,32 @@ void testIgnoredAnnounces() {
     tooFar.body.stepsRemoved = 255;
     qualify(bmc, tooFar, now);
     CHECK(!bmc.selected(), "stepsRemoved of 255 or more");
+
+    // An interval of 127 would keep a silent master for 1.7e38 s, and -128
+    // would never qualify one
+    for (int8_t logInterval : {int8_t(127), int8_t(5), int8_t(-4), int8_t(-128)}) {
+        BestMaster outside(config());
+        Master m = master(7);
+        m.logInterval = logInterval;
+        double t = 0;
+        for (int i = 0; i < 4; ++i, t += 0.1) outside.onAnnounce(announceFrom(m), t);
+        CHECK(!outside.selected(), "log announce interval " << int(logInterval));
+    }
+}
+
+void testAnnounceIntervalLimits() {
+    std::cout << "Announce intervals from 1/8 s to 16 s are followed" << std::endl;
+    for (int8_t logInterval : {int8_t(-3), int8_t(4)}) {
+        BestMaster bmc(config());
+        Master m = master(8);
+        m.logInterval = logInterval;
+        const double interval = std::ldexp(1.0, logInterval);
+        bmc.onAnnounce(announceFrom(m), 0);
+        bmc.onAnnounce(announceFrom(m), interval);
+        CHECK(bmc.selected().has_value(), "log interval " << int(logInterval) << " qualifies");
+        CHECK(!bmc.tick(interval * 3.9) && bmc.selected(), "log interval " << int(logInterval) << " kept inside its timeout");
+        CHECK(bmc.tick(interval * 4.1) && !bmc.selected(), "log interval " << int(logInterval) << " dropped after it");
+    }
 }
 
 } // namespace
@@ -191,6 +218,7 @@ int main() {
     testTimeoutUsesTheMastersInterval();
     testFallsBackToTheNextMaster();
     testIgnoredAnnounces();
+    testAnnounceIntervalLimits();
 
     std::cout << "\nPTP best master: " << checksPassed << " passed, " << checksFailed << " failed" << std::endl;
     return checksFailed == 0 ? 0 : 1;
