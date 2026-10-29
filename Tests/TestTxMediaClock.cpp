@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -550,9 +551,53 @@ void testFramesPerPacketFollowsPtime() {
     }
 }
 
+// An app's NaN sample used to leave as positive full scale: the clamp's
+// comparisons are false for NaN (#60). It goes out as silence; infinities
+// and samples past full scale are clipped.
+void testNaNSamplesGoOutAsSilence() {
+    std::cout << "#60: NaN samples go out as silence, infinities as full scale" << std::endl;
+    TxHarness h;
+    PacketCapture capture("239.69.99.150", 55190);
+    RTPTransmitter tx(txSdp("239.69.99.150", 55190), txMapping(0), h.context());
+    CHECK(tx.start(), "transmitter should start");
+
+    // Keep the stream's buffer written ahead of now: channel 0 alternates NaN
+    // and -NaN, channel 1 alternates +infinity and 2.0
+    std::vector<float> frames(256 * kChannels);
+    for (size_t f = 0; f < 256; ++f) {
+        frames[f * kChannels] = (f % 2) ? -std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::quiet_NaN();
+        frames[f * kChannels + 1] = (f % 2) ? 2.0f : std::numeric_limits<float>::infinity();
+    }
+    int64_t next = h.clock.snapshot().sampleAt(hostTimeNow());
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    while (std::chrono::steady_clock::now() < until) {
+        const int64_t target = h.clock.snapshot().sampleAt(hostTimeNow()) + 256;
+        while (next < target) {
+            h.routing.read([&](const TxRouting::Route& route) {
+                route.buffer->write(next, 128, frames.data(), kChannels, 0);
+            });
+            next += 128;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    tx.stop();
+    const auto packets = settled(capture.stop());
+
+    CHECK(packets.size() > 300, "about 380 packets should arrive (got " << packets.size() << ")");
+    bool silent = true;
+    bool fullScale = true;
+    for (const auto& p : packets) {
+        for (int32_t sample : p.channel0) silent = silent && sample == 0;
+        for (int32_t sample : p.channel1) fullScale = fullScale && sample == 8388607;
+    }
+    CHECK(silent, "NaN and -NaN should be sent as 0");
+    CHECK(fullScale, "+infinity and 2.0 should be sent as positive full scale");
+}
+
 } // namespace
 
 int main() {
+    testNaNSamplesGoOutAsSilence();
     testPtpTimestamps();
     testPtpLoopbackIsSampleExact();
     testPacketsCarryTheirMediaPositions();
