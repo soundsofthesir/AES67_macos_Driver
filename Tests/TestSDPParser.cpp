@@ -8,6 +8,9 @@
 #include <iostream>
 #include <fstream>
 #include <cassert>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 // These tests check with assert(). Release builds define NDEBUG, which would
 // compile every check away and let the suite pass without testing anything.
@@ -422,6 +425,88 @@ void testPacketTimingValidation() {
     std::cout << "PASSED\n";
 }
 
+// Numbers out of their field's range are refused, not wrapped into it (#73):
+// port 65541 used to read as 5, 65664 channels as 128, TTL -1 as 255
+void testNumericRanges() {
+    std::cout << "Test: numeric fields are range checked... ";
+
+    const std::string base = "v=0\n"
+                             "o=- 1311768467 1 IN IP4 10.0.0.5\n"
+                             "s=Ranges\n"
+                             "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 97\n"
+                             "a=rtpmap:97 L24/48000/8\n"
+                             "a=ptime:1\n"
+                             "a=framecount:48\n"
+                             "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-D1-7B-F3:domain-nmbr=0\n";
+    const auto with = [&](const std::string& from, const std::string& to) {
+        std::string text = base;
+        const size_t at = text.find(from);
+        assert(at != std::string::npos);
+        return text.replace(at, from.size(), to);
+    };
+
+    struct Refused { const char* what; std::string sdp; };
+    const std::vector<Refused> refused = {
+        {"port 65541", with("audio 5004 ", "audio 65541 ")},
+        {"port -1", with("audio 5004 ", "audio -1 ")},
+        {"port 5004x", with("audio 5004 ", "audio 5004x ")},
+        {"channels 65664", with("48000/8", "48000/65664")},
+        {"channels -1", with("48000/8", "48000/-1")},
+        {"ttl 300", with("1.1/32", "1.1/300")},
+        {"ttl -1", with("1.1/32", "1.1/-1")},
+        {"ttl abc", with("1.1/32", "1.1/abc")},
+        {"payload type 353", with("RTP/AVP 97", "RTP/AVP 353")},
+        {"payload type 128", with("RTP/AVP 97", "RTP/AVP 128")},
+        {"payload type -1", with("RTP/AVP 97", "RTP/AVP -1")},
+        {"rate 4294967297", with("L24/48000", "L24/4294967297")},
+        {"rate -48000", with("L24/48000", "L24/-48000")},
+        {"framecount 4294967297", with("framecount:48", "framecount:4294967297")},
+        {"framecount -1", with("framecount:48", "framecount:-1")},
+        {"PTP domain 999", with("domain-nmbr=0", "domain-nmbr=999")},
+        {"PTP domain 256", with("domain-nmbr=0", "domain-nmbr=256")},
+        {"session ID -1", with("- 1311768467 1 ", "- -1 1 ")},
+        {"session ID 2^64", with("- 1311768467 1 ", "- 18446744073709551616 1 ")},
+        {"session version -5", with("- 1311768467 1 ", "- 1311768467 -5 ")},
+        {"start time -1", with("t=0 0", "t=-1 0")},
+        {"ptime 1e7", with("ptime:1", "ptime:1e7")},
+    };
+    int wronglyAccepted = 0;
+    for (const auto& c : refused) {
+        if (SDPParser::parseString(c.sdp).has_value()) {
+            std::cerr << "\n  accepted " << c.what;
+            ++wronglyAccepted;
+        }
+    }
+
+    // The largest values that fit, and the forms that carry a second number
+    struct Accepted { const char* what; std::string sdp; bool (*holds)(const SDPSession&); };
+    const std::vector<Accepted> accepted = {
+        {"port 65535", with("audio 5004 ", "audio 65535 "), [](const SDPSession& s) { return s.port == 65535; }},
+        {"port with a count", with("audio 5004 ", "audio 5004/2 "), [](const SDPSession& s) { return s.port == 5004; }},
+        {"payload type 127", with("RTP/AVP 97", "RTP/AVP 127"), [](const SDPSession& s) { return s.payloadType == 127; }},
+        {"ttl 255", with("1.1/32", "1.1/255"), [](const SDPSession& s) { return s.ttl == 255; }},
+        {"ttl with an address count", with("1.1/32", "1.1/32/3"), [](const SDPSession& s) { return s.ttl == 32; }},
+        {"128 channels", with("48000/8", "48000/128"), [](const SDPSession& s) { return s.numChannels == 128; }},
+        {"PTP domain 255", with("domain-nmbr=0", "domain-nmbr=255"), [](const SDPSession& s) { return s.ptpDomain == 255; }},
+        {"session ID 2^64-1", with("- 1311768467 1 ", "- 18446744073709551615 1 "),
+         [](const SDPSession& s) { return s.sessionID == UINT64_MAX; }},
+    };
+    int wronglyRefused = 0;
+    for (const auto& c : accepted) {
+        const auto session = SDPParser::parseString(c.sdp);
+        if (!session || !c.holds(*session)) {
+            std::cerr << "\n  refused or misread " << c.what;
+            ++wronglyRefused;
+        }
+    }
+    if (wronglyAccepted || wronglyRefused) std::cerr << "\n";
+    assert(wronglyAccepted == 0 && wronglyRefused == 0);
+
+    std::cout << "PASSED\n";
+}
+
 void runAllTests() {
     std::cout << "\n=== AES67 SDP Parser Test Suite ===\n\n";
 
@@ -436,6 +521,7 @@ void runAllTests() {
     testFractionalPtime();
     testRtpmapWithoutChannelCount();
     testPacketTimingValidation();
+    testNumericRanges();
     testInvalidSDP();
     testFileOperations();
 

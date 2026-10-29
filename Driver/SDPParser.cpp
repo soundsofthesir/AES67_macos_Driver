@@ -13,8 +13,34 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
+#include <optional>
 
 namespace AES67 {
+
+namespace {
+
+/// `text` as a decimal number from 0 to `max`, or nullopt. Digits only (no
+/// sign, space or suffix), so a value outside its field's range is refused
+/// rather than wrapped into it (#73).
+std::optional<uint64_t> decimal(const std::string& text, uint64_t max) {
+    if (text.empty()) return std::nullopt;
+    uint64_t value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') return std::nullopt;
+        const auto digit = static_cast<uint64_t>(c - '0');
+        if (value > (max - digit) / 10) return std::nullopt;
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+/// The first number of SDP's "<port>/<count>" and "<ttl>/<count>" forms.
+std::string beforeSlash(const std::string& text) {
+    return text.substr(0, text.find('/'));
+}
+
+} // namespace
 
 // ============================================================================
 // Validation
@@ -167,12 +193,13 @@ bool SDPParser::parseOriginLine(const std::string& line, SDPSession& session) {
 
     session.originUsername = parts[0];
 
-    try {
-        session.sessionID = std::stoull(parts[1]);
-        session.sessionVersion = std::stoull(parts[2]);
-    } catch (...) {
+    const auto id = decimal(parts[1], UINT64_MAX);
+    const auto version = decimal(parts[2], UINT64_MAX);
+    if (!id || !version) {
         return false;
     }
+    session.sessionID = *id;
+    session.sessionVersion = *version;
 
     session.originNetworkType = parts[3];
     session.originAddressType = parts[4];
@@ -194,15 +221,15 @@ bool SDPParser::parseConnectionLine(const std::string& line, SDPSession& session
 
     std::string addrPart = parts[2];
 
-    // Handle multicast with TTL: address/ttl
+    // Handle multicast with TTL: address/ttl, or address/ttl/count
     auto slashPos = addrPart.find('/');
     if (slashPos != std::string::npos) {
         session.connectionAddress = addrPart.substr(0, slashPos);
-        try {
-            session.ttl = std::stoi(addrPart.substr(slashPos + 1));
-        } catch (...) {
-            session.ttl = 32;  // Default TTL
+        const auto ttl = decimal(beforeSlash(addrPart.substr(slashPos + 1)), UINT8_MAX);
+        if (!ttl) {
+            return false;
         }
+        session.ttl = static_cast<uint8_t>(*ttl);
     } else {
         session.connectionAddress = addrPart;
     }
@@ -217,12 +244,13 @@ bool SDPParser::parseTimingLine(const std::string& line, SDPSession& session) {
         return false;
     }
 
-    try {
-        session.timeStart = std::stoull(parts[0]);
-        session.timeStop = std::stoull(parts[1]);
-    } catch (...) {
+    const auto start = decimal(parts[0], UINT64_MAX);
+    const auto stop = decimal(parts[1], UINT64_MAX);
+    if (!start || !stop) {
         return false;
     }
+    session.timeStart = *start;
+    session.timeStop = *stop;
 
     return true;
 }
@@ -237,19 +265,21 @@ bool SDPParser::parseMediaLine(const std::string& line, SDPSession& session) {
 
     session.mediaType = parts[0];
 
-    try {
-        session.port = std::stoi(parts[1]);
-    } catch (...) {
+    // <port> or <port>/<count>
+    const auto port = decimal(beforeSlash(parts[1]), UINT16_MAX);
+    if (!port) {
         return false;
     }
+    session.port = static_cast<uint16_t>(*port);
 
     session.transport = parts[2];
 
-    try {
-        session.payloadType = std::stoi(parts[3]);
-    } catch (...) {
+    // RTP payload types are 7 bits
+    const auto payloadType = decimal(parts[3], 127);
+    if (!payloadType) {
         return false;
     }
+    session.payloadType = static_cast<uint8_t>(*payloadType);
 
     return true;
 }
@@ -305,13 +335,14 @@ bool SDPParser::parseRTPMapAttribute(const std::string& value, SDPSession& sessi
 
     session.encoding = formatParts[0];
 
-    try {
-        session.sampleRate = std::stoul(formatParts[1]);
-        // RFC 3551: no channel count means one channel
-        session.numChannels = formatParts.size() >= 3 ? std::stoi(formatParts[2]) : 1;
-    } catch (...) {
+    const auto sampleRate = decimal(formatParts[1], UINT32_MAX);
+    // RFC 3551: no channel count means one channel
+    const auto channels = formatParts.size() >= 3 ? decimal(formatParts[2], UINT16_MAX) : std::optional<uint64_t>(1);
+    if (!sampleRate || !channels) {
         return false;
     }
+    session.sampleRate = static_cast<uint32_t>(*sampleRate);
+    session.numChannels = static_cast<uint16_t>(*channels);
 
     return true;
 }
@@ -333,12 +364,12 @@ bool SDPParser::parsePTimeAttribute(const std::string& value, SDPSession& sessio
 }
 
 bool SDPParser::parseFrameCountAttribute(const std::string& value, SDPSession& session) {
-    try {
-        session.framecount = std::stoul(value);
-        return true;
-    } catch (...) {
+    const auto framecount = decimal(trim(value), UINT32_MAX);
+    if (!framecount) {
         return false;
     }
+    session.framecount = static_cast<uint32_t>(*framecount);
+    return true;
 }
 
 bool SDPParser::parseSourceFilterAttribute(const std::string& value, SDPSession& session) {
@@ -368,8 +399,13 @@ bool SDPParser::parsePTPRefClockAttribute(const std::string& value, SDPSession& 
     std::smatch match;
 
     if (std::regex_search(value, match, ptpRegex)) {
+        // A PTP domain number is one byte
+        const auto domain = match[2].matched ? decimal(match[2], UINT8_MAX) : std::optional<uint64_t>(0);
+        if (!domain) {
+            return false;
+        }
         session.ptpMasterMAC = match[1];
-        session.ptpDomain = match[2].matched ? std::stoi(match[2]) : 0;
+        session.ptpDomain = static_cast<int>(*domain);
         return true;
     }
 
