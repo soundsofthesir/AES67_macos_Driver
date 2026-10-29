@@ -405,6 +405,10 @@ target_compile_features(TestPtpClockSource PRIVATE cxx_std_17)
 target_compile_definitions(TestPtpTimeReceiver PRIVATE AES67_PTP_TEST_EVENT_PORT=31319)
 target_compile_definitions(TestPtpClockSource PRIVATE AES67_PTP_TEST_EVENT_PORT=31329)
 
+# SAP test ports, one per binary that announces (Tests/SapTestSupport.h)
+target_compile_definitions(TestCriticalPathRegressions PRIVATE AES67_SAP_TEST_PORT=19875)
+target_compile_definitions(TestSAPAnnouncer PRIVATE AES67_SAP_TEST_PORT=19885)
+
 # Add tests to CTest
 enable_testing()
 add_test(NAME ClockRecovery COMMAND TestClockRecovery)
