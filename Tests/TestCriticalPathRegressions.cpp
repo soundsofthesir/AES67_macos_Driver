@@ -45,12 +45,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <iostream>
 #include <sstream>
@@ -1948,6 +1950,69 @@ void testRealTimePriorityReportsSuccess() {
     }
 }
 
+// A test host for the device's notifications: the first lock notification
+// waits until the device's destruction has started, then a little longer,
+// so the PTP thread is inside OnPtpChanged during teardown (#58)
+namespace teardown {
+std::mutex mutex;
+std::condition_variable changed;
+bool holding = false;
+bool tearingDown = false;
+
+OSStatus propertiesChanged(AudioServerPlugInHostRef, AudioObjectID, UInt32 count,
+                           const AudioObjectPropertyAddress* addresses) {
+    const bool lockChange = std::any_of(addresses, addresses + count, [](const AudioObjectPropertyAddress& a) {
+        return a.mSelector == kAudioDevicePropertyClockIsStable;
+    });
+    std::unique_lock<std::mutex> lock(mutex);
+    if (!lockChange || holding) return kAudioHardwareNoError;
+    holding = true;
+    changed.notify_all();
+    if (changed.wait_for(lock, std::chrono::seconds(30), [] { return tearingDown; })) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the destructor goes on meanwhile
+    }
+    return kAudioHardwareNoError;
+}
+OSStatus copyFromStorage(AudioServerPlugInHostRef, CFStringRef, CFPropertyListRef* data) {
+    *data = nullptr;
+    return kAudioHardwareUnspecifiedError;
+}
+OSStatus writeToStorage(AudioServerPlugInHostRef, CFStringRef, CFPropertyListRef) { return kAudioHardwareNoError; }
+OSStatus deleteFromStorage(AudioServerPlugInHostRef, CFStringRef) { return kAudioHardwareNoError; }
+OSStatus requestConfigurationChange(AudioServerPlugInHostRef, AudioObjectID, UInt64, void*) {
+    return kAudioHardwareNoError;
+}
+const AudioServerPlugInHostInterface host = {propertiesChanged, copyFromStorage, writeToStorage,
+                                             deleteFromStorage, requestConfigurationChange};
+} // namespace teardown
+
+void testPtpLockChangeDuringTeardown() {
+    std::cout << "PTP: a lock change while the device is destroyed" << std::endl;
+    useNoConfig("ptp-teardown");
+    usePtpSettings(R"({"enabled": true, "interface": "lo0"})");
+    auto context = std::make_shared<aspl::Context>();
+    context->Host = &teardown::host;
+    auto device = std::make_shared<AES67Device>(context);
+    device->Initialize();
+
+    PtpTest::ScriptedMaster::Settings settings;
+    settings.eventPort = 319;
+    settings.generalPort = 320;
+    PtpTest::ScriptedMaster master(settings);
+    {
+        std::unique_lock<std::mutex> lock(teardown::mutex);
+        CHECK(teardown::changed.wait_for(lock, std::chrono::seconds(25), [] { return teardown::holding; }),
+              "the device reports the lock");
+        teardown::tearingDown = true;
+    }
+    teardown::changed.notify_all();
+    // Before the fix, ptpClock_ was null by the time OnPtpChanged read it
+    device.reset();
+    CHECK(true, "the device is destroyed with its listener running");
+    noPtpSettings();
+}
+
 int main() {
     // No test may pick up a real ptp.json: PTP only where a test asks for it
     noPtpSettings();
@@ -1960,6 +2025,7 @@ int main() {
     testDeviceClockFollowsReceivedStream();
     testPtpIsOffByDefault();
     testPtpTakesTheDeviceClock();
+    testPtpLockChangeDuringTeardown();
     testTxOptionsAreSaved();
     testInterfaceSettingSurvivesReloadAndSave();
     testFractionalPtimeSurvivesReload();
