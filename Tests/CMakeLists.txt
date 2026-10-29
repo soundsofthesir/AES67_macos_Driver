@@ -330,6 +330,17 @@ target_include_directories(TestPtpBestMaster PRIVATE
 
 target_compile_features(TestPtpBestMaster PRIVATE cxx_std_17)
 
+# Test: pairing a two-step master's Syncs with their Follow_Ups
+add_executable(TestPtpSyncPairer
+    TestPtpSyncPairer.cpp
+)
+
+target_include_directories(TestPtpSyncPairer PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestPtpSyncPairer PRIVATE cxx_std_17)
+
 # Test: the PTP servo, in simulation
 add_executable(TestPtpServo
     TestPtpServo.cpp
@@ -429,6 +440,7 @@ add_test(NAME SAPAnnouncer COMMAND TestSAPAnnouncer)
 add_test(NAME NetworkMonitor COMMAND TestNetworkMonitor)
 add_test(NAME PtpMessages COMMAND TestPtpMessages)
 add_test(NAME PtpBestMaster COMMAND TestPtpBestMaster)
+add_test(NAME PtpSyncPairer COMMAND TestPtpSyncPairer)
 add_test(NAME PtpServo COMMAND TestPtpServo)
 add_test(NAME PtpTimeReceiver COMMAND TestPtpTimeReceiver)
 add_test(NAME PtpClockControl COMMAND TestPtpClockControl)

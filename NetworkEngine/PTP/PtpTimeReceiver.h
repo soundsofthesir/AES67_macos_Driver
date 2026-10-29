@@ -7,6 +7,7 @@
 #include "PtpMessages.h"
 #include "PtpServo.h"
 #include "PtpSocket.h"
+#include "PtpSyncPairer.h"
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -72,17 +73,6 @@ public:
     PortIdentity identity() const { return self_; }
 
 private:
-    struct PendingSync {
-        uint16_t sequenceId;
-        uint64_t hostReceiveNs;
-        double correctionNs;
-    };
-    struct PendingFollowUp {
-        uint16_t sequenceId;
-        uint64_t preciseOriginNs;
-        double correctionNs;
-    };
-
     void run();
     void drain(Socket& socket);
     void handle(const Message& message, uint64_t hostReceiveNs, uint32_t sourceAddress);
@@ -110,8 +100,7 @@ private:
     std::optional<PortIdentity> master_;       // the selected master
     std::optional<PortIdentity> servoMaster_;  // whose Syncs the servo holds
     std::map<PortIdentity, uint32_t> addresses_;  // each master's IPv4 address
-    std::optional<PendingSync> pendingSync_;
-    std::optional<PendingFollowUp> pendingFollowUp_;
+    SyncPairer pairer_;
     uint16_t delaySequence_{0};
     std::optional<uint64_t> delaySentNs_;  // t3 of the outstanding Delay_Req
     int8_t logDelayInterval_{0};
