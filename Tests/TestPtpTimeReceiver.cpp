@@ -187,6 +187,27 @@ void testHoldoverWhenTheMasterGoes() {
     receiver.stop();
 }
 
+void testHoldoverWhenSyncsStop() {
+    std::cout << "Syncs stop, Announces go on: holdover, then acquiring when holdover runs out" << std::endl;
+    ScriptedMaster master(ScriptedMaster::Settings{});
+    TimeReceiver::Config config = receiverConfig();
+    config.servo.holdoverLimitSeconds = 2.0;
+    TimeReceiver receiver(config);
+    CHECK(receiver.start(), "the receiver should start");
+    const Result before = waitForLock(receiver, master, 20);
+    CHECK(before.locked, "locks");
+    master.stopSyncs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // Sync timeout: 1 s at 16 per second
+    const auto quiet = receiver.status();
+    CHECK(quiet.state == Servo::State::Holdover && quiet.master, "holdover, with the master still announcing (state "
+                                                                     << int(quiet.state) << ")");
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    const auto gaveUp = receiver.status();
+    CHECK(gaveUp.state == Servo::State::Acquiring && !gaveUp.estimate, "acquiring once holdover runs out (state "
+                                                                           << int(gaveUp.state) << ")");
+    receiver.stop();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -199,6 +220,7 @@ int main(int argc, char** argv) {
         {"worseMaster", testIgnoresAWorseMastersSyncs},
         {"betterMaster", testSwitchesToABetterMaster},
         {"holdover", testHoldoverWhenTheMasterGoes},
+        {"syncsStop", testHoldoverWhenSyncsStop},
     };
     for (const auto& [name, test] : tests) {
         if (only.empty() || std::string(name).find(only) != std::string::npos) test();

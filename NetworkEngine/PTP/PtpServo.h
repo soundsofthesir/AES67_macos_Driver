@@ -34,7 +34,13 @@ namespace Ptp {
 /// "how many are good" is the test, not "is the best one good". Holding lock
 /// is judged more leniently than acquiring it. A jump in the master's time
 /// (a new grandmaster epoch) is confirmed by consecutive agreeing Syncs, then
-/// starts a new timeline (generation). Deterministic and not thread-safe.
+/// starts a new timeline (generation). A line further from the host clock's
+/// rate than any real clock could be never locks.
+///
+/// Holdover keeps a locked line when the master goes (its Announces time
+/// out) or its Syncs stop; an unlocked line is never held over. Holdover
+/// ends when Syncs return, or after holdoverLimitSeconds, when the line is
+/// dropped and a new timeline begins. Deterministic and not thread-safe.
 class Servo {
 public:
     struct Config {
@@ -54,6 +60,10 @@ public:
         double stepThresholdNs{10e6};    // a Sync this far off is a step candidate
         size_t stepConfirmSamples{3};    // consecutive agreeing candidates confirm a step
         double maxRejectedFraction{0.25};
+        double maxRateErrorPpm{500.0};     // a line further from the host clock is not a real clock
+        size_t syncReceiptTimeout{3};      // Sync intervals without a Sync before Locked drops to Holdover
+        double minSyncReceiptTimeoutSeconds{1.0};
+        double holdoverLimitSeconds{60.0};  // then the line is dropped and a new timeline begins
     };
 
     enum class State { Acquiring, Locked, Holdover };
@@ -78,8 +88,11 @@ public:
     /// @param correctionNs The Delay_Resp correction field (subtracted from t4).
     void onDelay(uint64_t hostSendNs, uint64_t masterReceiveNs, double correctionNs);
 
-    /// The master has gone: keep the current line until it (or another) returns.
-    void holdover();
+    /// The master has gone: keep a locked line until it (or another) returns.
+    void holdover(uint64_t hostNowNs);
+
+    /// Apply the Sync receipt timeout and the holdover limit. Call regularly.
+    void tick(uint64_t hostNowNs);
 
     /// Forget everything (a different master); starts a new generation.
     void reset();
@@ -127,6 +140,9 @@ private:
     double slope_{1.0};
     double intercept_{0.0};
     double pathDelayNs_{0.0};
+
+    uint64_t lastSyncNs_{0};       // host receive time of the latest Sync
+    uint64_t holdoverSinceNs_{0};
 
     State state_{State::Acquiring};
     uint32_t generation_{1};

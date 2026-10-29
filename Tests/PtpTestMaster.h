@@ -86,6 +86,7 @@ public:
         return s_.epochNs + static_cast<uint64_t>(std::llround(static_cast<double>(hostNs) * (1.0 + s_.skewPpm * 1e-6)));
     }
     const PortIdentity& identity() const { return identity_; }
+    void stopSyncs() { sendingSyncs_ = false; }  // keeps announcing and answering Delay_Req
     uint64_t multicastDelayRequests() const { return multicastRequests_.load(); }
     uint64_t unicastDelayRequests() const { return unicastRequests_.load(); }
 
@@ -163,7 +164,10 @@ private:
         while (running_) {
             const uint64_t now = hostNanos();
             if (now >= nextAnnounce) { sendAnnounce(); nextAnnounce += announceNs; }
-            if (now >= nextSync) { sendSync(); nextSync += syncNs; }
+            if (now >= nextSync) {
+                if (sendingSyncs_) sendSync();
+                nextSync += syncNs;
+            }
             pollfd fds[2] = {{multicastEvent_.fd(), POLLIN, 0}, {unicastEvent_.fd(), POLLIN, 0}};
             ::poll(fds, 2, 2);
             readEventPort(multicastEvent_, false);
@@ -190,6 +194,7 @@ private:
     std::atomic<uint64_t> multicastRequests_{0};
     std::atomic<uint64_t> unicastRequests_{0};
     std::atomic<bool> running_{true};
+    std::atomic<bool> sendingSyncs_{true};
     std::thread thread_;
 };
 
