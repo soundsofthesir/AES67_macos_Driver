@@ -110,6 +110,11 @@ struct RTPPacket {
     }
 };
 
+/// Parses one received RTP packet (RFC 3550 5.1). The payload starts after
+/// any CSRCs and header extension and excludes padding. Returns false if the
+/// packet is shorter than its header says.
+bool parsePacket(uint8_t* data, size_t length, RTPPacket& packet);
+
 //
 // RTP Socket - Simple UDP multicast wrapper
 //

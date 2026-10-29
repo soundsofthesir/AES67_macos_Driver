@@ -255,21 +255,46 @@ ssize_t RTPSocket::receive(RTPPacket& packet, uint8_t* buffer, size_t bufferSize
         return -1;
     }
 
-    // Check for valid RTP packet size
-    if (bytesReceived < (ssize_t)sizeof(RTPHeader)) {
-        // Packet too small to contain RTP header
+    if (!parsePacket(buffer, static_cast<size_t>(bytesReceived), packet)) {
         return -1;
     }
 
-    // Parse header
-    memcpy(&packet.header, buffer, sizeof(RTPHeader));
+    return bytesReceived;
+}
+
+bool parsePacket(uint8_t* data, size_t length, RTPPacket& packet) {
+    if (length < sizeof(RTPHeader)) {
+        return false;
+    }
+    memcpy(&packet.header, data, sizeof(RTPHeader));
     packet.header.toHostOrder();
 
-    // Set payload pointer and size
-    packet.payload = buffer + sizeof(RTPHeader);
-    packet.payloadSize = bytesReceived - sizeof(RTPHeader);
+    size_t offset = sizeof(RTPHeader) + 4 * packet.header.cc;
+    if (packet.header.extension) {
+        // 16-bit profile, then the extension length in 32-bit words
+        if (length < offset + 4) {
+            return false;
+        }
+        const size_t words = (static_cast<size_t>(data[offset + 2]) << 8) | data[offset + 3];
+        offset += 4 + 4 * words;
+    }
+    if (length < offset) {
+        return false;
+    }
 
-    return bytesReceived;
+    size_t end = length;
+    if (packet.header.padding) {
+        // The last byte counts the padding, itself included
+        const size_t padding = data[length - 1];
+        if (padding == 0 || padding > length - offset) {
+            return false;
+        }
+        end -= padding;
+    }
+
+    packet.payload = data + offset;
+    packet.payloadSize = end - offset;
+    return true;
 }
 
 void RTPSocket::close() {
