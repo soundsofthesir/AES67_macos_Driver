@@ -10,6 +10,7 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
+#include <algorithm>
 
 using namespace AES67;
 using namespace AES67::RTP;
@@ -307,6 +308,122 @@ bool testTimestampCalculation() {
 }
 
 //
+// Packet Parsing Tests (#46)
+//
+
+// Fixed header with the given first byte, seq 0x1234, ts 0x01020304,
+// SSRC 0xAABBCCDD, PT 97 with the marker set
+static std::vector<uint8_t> rtpHeader(uint8_t firstByte) {
+    return {firstByte, 0x80 | 97, 0x12, 0x34, 0x01, 0x02, 0x03, 0x04, 0xAA, 0xBB, 0xCC, 0xDD};
+}
+
+static const std::vector<uint8_t> kPayload = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+
+static bool payloadIs(const RTPPacket& packet, const std::vector<uint8_t>& expected) {
+    return packet.payloadSize == expected.size() &&
+           std::equal(expected.begin(), expected.end(), packet.payload);
+}
+
+bool testParsePlainPacket() {
+    std::cout << "Test: parse plain packet... ";
+
+    auto data = rtpHeader(0x80);
+    data.insert(data.end(), kPayload.begin(), kPayload.end());
+    RTPPacket packet;
+    TEST_ASSERT(parsePacket(data.data(), data.size(), packet), "Plain packet should parse");
+    TEST_ASSERT(packet.header.version == 2, "Version should be 2");
+    TEST_ASSERT(packet.header.marker == 1, "Marker should be set");
+    TEST_ASSERT(packet.header.payloadType == 97, "Payload type should be 97");
+    TEST_ASSERT(packet.header.sequenceNumber == 0x1234, "Sequence number in host order");
+    TEST_ASSERT(packet.header.timestamp == 0x01020304, "Timestamp in host order");
+    TEST_ASSERT(packet.header.ssrc == 0xAABBCCDD, "SSRC in host order");
+    TEST_ASSERT(payloadIs(packet, kPayload), "Payload should start at byte 12");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testParseCsrcs() {
+    std::cout << "Test: parse packet with CSRCs... ";
+
+    auto data = rtpHeader(0x82);  // CC = 2
+    data.insert(data.end(), 8, 0xEE);
+    data.insert(data.end(), kPayload.begin(), kPayload.end());
+    RTPPacket packet;
+    TEST_ASSERT(parsePacket(data.data(), data.size(), packet), "Packet with CSRCs should parse");
+    TEST_ASSERT(payloadIs(packet, kPayload), "Payload should start after the CSRCs");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testParseExtension() {
+    std::cout << "Test: parse packet with header extension... ";
+
+    auto data = rtpHeader(0x91);  // X set, CC = 1
+    data.insert(data.end(), 4, 0xEE);                       // CSRC
+    data.insert(data.end(), {0xBE, 0xDE, 0x00, 0x02});      // profile, 2 words
+    data.insert(data.end(), 8, 0xEE);                       // extension data
+    data.insert(data.end(), kPayload.begin(), kPayload.end());
+    RTPPacket packet;
+    TEST_ASSERT(parsePacket(data.data(), data.size(), packet), "Packet with extension should parse");
+    TEST_ASSERT(payloadIs(packet, kPayload), "Payload should start after the extension");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testParsePadding() {
+    std::cout << "Test: parse packet with padding... ";
+
+    auto data = rtpHeader(0xA0);  // P set
+    data.insert(data.end(), kPayload.begin(), kPayload.end());
+    data.insert(data.end(), {0x00, 0x00, 0x03});  // 3 padding bytes, count last
+    RTPPacket packet;
+    TEST_ASSERT(parsePacket(data.data(), data.size(), packet), "Padded packet should parse");
+    TEST_ASSERT(payloadIs(packet, kPayload), "Padding should be stripped");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testParseRejectsTruncated() {
+    std::cout << "Test: parse rejects truncated packets... ";
+
+    RTPPacket packet;
+    auto shortHeader = rtpHeader(0x80);
+    TEST_ASSERT(!parsePacket(shortHeader.data(), 11, packet), "11 bytes is not a header");
+
+    auto csrcs = rtpHeader(0x8F);  // CC = 15 needs 60 more bytes
+    csrcs.insert(csrcs.end(), 56, 0xEE);
+    TEST_ASSERT(!parsePacket(csrcs.data(), csrcs.size(), packet), "Missing CSRCs should be refused");
+
+    auto noExtHeader = rtpHeader(0x90);
+    noExtHeader.insert(noExtHeader.end(), {0xBE, 0xDE});
+    TEST_ASSERT(!parsePacket(noExtHeader.data(), noExtHeader.size(), packet),
+                "Cut extension header should be refused");
+
+    auto longExt = rtpHeader(0x90);
+    longExt.insert(longExt.end(), {0xBE, 0xDE, 0xFF, 0xFF});
+    longExt.insert(longExt.end(), kPayload.begin(), kPayload.end());
+    TEST_ASSERT(!parsePacket(longExt.data(), longExt.size(), packet),
+                "Extension longer than the packet should be refused");
+
+    auto zeroPad = rtpHeader(0xA0);
+    zeroPad.insert(zeroPad.end(), kPayload.begin(), kPayload.end());
+    zeroPad.push_back(0x00);
+    TEST_ASSERT(!parsePacket(zeroPad.data(), zeroPad.size(), packet), "Padding count 0 should be refused");
+
+    auto bigPad = rtpHeader(0xA0);
+    bigPad.insert(bigPad.end(), {0x00, 0x00, 0x09});  // 9 > 3 bytes after the header
+    TEST_ASSERT(!parsePacket(bigPad.data(), bigPad.size(), packet),
+                "Padding past the header should be refused");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+//
 // Main Test Runner
 //
 
@@ -321,6 +438,11 @@ int main() {
     testRTPPacketStructure();
     testRTPHeaderSize();
     testSequenceNumberHandling();
+    testParsePlainPacket();
+    testParseCsrcs();
+    testParseExtension();
+    testParsePadding();
+    testParseRejectsTruncated();
     std::cout << std::endl;
 
     std::cout << "Audio Codec Tests:" << std::endl;
