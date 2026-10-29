@@ -22,7 +22,13 @@
 namespace AES67 {
 namespace TestSupport {
 
-constexpr uint16_t kTestSapPort = 19875;
+// Each test binary that announces gets its own port (AES67_SAP_TEST_PORT, set
+// in Tests/CMakeLists.txt): ctest -j runs binaries side by side, and on a
+// shared port each one captures the other's announcements and deletions.
+#ifndef AES67_SAP_TEST_PORT
+#define AES67_SAP_TEST_PORT 19875
+#endif
+constexpr uint16_t kTestSapPort = AES67_SAP_TEST_PORT;
 
 struct Received {
     std::vector<uint8_t> bytes;
