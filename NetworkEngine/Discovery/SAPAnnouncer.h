@@ -74,6 +74,7 @@ private:
     void run();
     void send(const Session& session, bool deletion);  // caller holds mutex_
     int socketFor(const std::string& interfaceAddress, uint8_t ttl);  // caller holds mutex_
+    void closeUnusedSockets();  // caller holds mutex_
     std::chrono::steady_clock::duration jitteredInterval();  // caller holds mutex_
 
     const Config config_;
