@@ -40,9 +40,25 @@ void Servo::reset() {
     ++generation_;
 }
 
-void Servo::holdover() {
-    if (haveLine_) {
+void Servo::holdover(uint64_t hostNowNs) {
+    if (state_ == State::Locked) {
         state_ = State::Holdover;
+        holdoverSinceNs_ = hostNowNs;
+    }
+}
+
+void Servo::tick(uint64_t hostNowNs) {
+    if (state_ == State::Locked && samples_.size() >= 2) {
+        const double intervalNs =
+            nanosBetween(samples_.back().host, samples_.front().host) / static_cast<double>(samples_.size() - 1);
+        const double timeoutNs = std::max(static_cast<double>(config_.syncReceiptTimeout) * intervalNs,
+                                          config_.minSyncReceiptTimeoutSeconds * 1e9);
+        if (nanosBetween(hostNowNs, lastSyncNs_) > timeoutNs) {
+            holdover(hostNowNs);
+        }
+    }
+    if (state_ == State::Holdover && nanosBetween(hostNowNs, holdoverSinceNs_) > config_.holdoverLimitSeconds * 1e9) {
+        reset();
     }
 }
 
@@ -52,6 +68,7 @@ double Servo::envelopeOffsetAt(uint64_t hostNs) const {
 
 void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correctionNs) {
     const Sample sample{hostReceiveNs, masterSendNs + static_cast<uint64_t>(std::llround(correctionNs))};
+    lastSyncNs_ = hostReceiveNs;
 
     if (haveLine_) {
         // How far this Sync is from where the line says it should be: zero
@@ -210,7 +227,8 @@ void Servo::judgeLock() {
         const double fraction = holding ? config_.holdGoodFraction : config_.lockGoodFraction;
         predicts = static_cast<double>(good) >= fraction * static_cast<double>(history);
     }
-    state_ = (enough && predicts && consistent) ? State::Locked : State::Acquiring;
+    const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
+    state_ = (enough && predicts && consistent && plausible) ? State::Locked : State::Acquiring;
 }
 
 std::optional<Servo::Estimate> Servo::estimate() const {

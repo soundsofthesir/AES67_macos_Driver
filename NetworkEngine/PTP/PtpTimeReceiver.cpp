@@ -130,6 +130,7 @@ void TimeReceiver::run() {
         if (bestMaster_->tick(seconds(now))) {
             masterChanged();
         }
+        servo_->tick(now);
         sendDelayRequestIfDue(now);
         publish();
     }
@@ -175,7 +176,7 @@ void TimeReceiver::masterChanged() {
     pairer_.reset();
     delaySentNs_.reset();
     if (!master_) {
-        servo_->holdover();  // keep the line until a master returns
+        servo_->holdover(nowNanos());  // keep the line until a master returns
         return;
     }
     if (servoMaster_ && *servoMaster_ != *master_) {

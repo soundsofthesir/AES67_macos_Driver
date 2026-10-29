@@ -117,6 +117,7 @@ public:
     }
 
     Master& master() { return master_; }
+    uint64_t nowNs() const { return nowNs_; }
     void skipTo(double seconds) {  // nothing exchanged meanwhile (master lost, Mac asleep)
         nowNs_ = static_cast<uint64_t>(seconds * 1e9);
         nextSyncNs_ = std::max(nextSyncNs_, nowNs_);
@@ -256,8 +257,9 @@ void testHoldover() {
     Simulation sim(Master{}, Network{}, 4.0, 7);
     sim.runUntil(120);
     const uint32_t generation = sim.measure().generation;
-    sim.servo.holdover();
+    sim.servo.holdover(sim.nowNs());
     sim.skipTo(150);  // 30 s without the master
+    sim.servo.tick(sim.nowNs());
     const Run quiet = sim.measure();
     CHECK(quiet.state == Servo::State::Holdover, "in holdover");
     CHECK(std::fabs(quiet.phaseErrorNs) < 50000, "30 s of holdover drifts under 50 us (" << quiet.phaseErrorNs << " ns)");
@@ -266,6 +268,97 @@ void testHoldover() {
     CHECK(back.state == Servo::State::Locked && back.generation == generation,
           "the master's return resumes the same timeline, without a step");
     CHECK(std::fabs(back.phaseErrorNs) < 20000, "within 20 us again (" << back.phaseErrorNs << " ns)");
+}
+
+// #53: an Announce timeout before lock must not turn an unchecked line
+// into one the device clock follows
+void testNoHoldoverBeforeLock() {
+    std::cout << "A master lost before lock leaves the servo acquiring, not in holdover" << std::endl;
+    // The issue's case: two Syncs 125 ms apart, the first queued 1 ms
+    Servo servo;
+    const uint64_t t1 = kTaiEpochNs;
+    servo.onSync(1000000 + 1000000, t1, 0.0);
+    servo.onSync(126000000, t1 + 125000000, 0.0);
+    CHECK(servo.estimate().has_value(), "a line from two Syncs");
+    servo.holdover(200000000);
+    CHECK(servo.state() == Servo::State::Acquiring, "two Syncs: still acquiring (state " << int(servo.state()) << ")");
+
+    Simulation sim(Master{}, Network{}, 4.0, 8);
+    sim.runUntil(5);  // too short a span to lock
+    CHECK(sim.measure().state == Servo::State::Acquiring, "5 s of Syncs: acquiring");
+    sim.servo.holdover(sim.nowNs());
+    CHECK(sim.measure().state == Servo::State::Acquiring, "5 s of Syncs, then the master goes: still acquiring");
+}
+
+// #53: a line can only be followed at a rate a real clock could have
+void testImplausibleRateNeverLocks() {
+    std::cout << "A line more than 500 ppm from the host clock never locks" << std::endl;
+    for (double skew : {-2000.0, 1000.0, 8000.0}) {
+        Master m;
+        m.skewPpm = skew;
+        Simulation sim(m, Network{}, 4.0, 9);
+        bool everLocked = false;
+        for (int t = 10; t <= 120; t += 2) {
+            sim.runUntil(t);
+            everLocked = everLocked || sim.measure().state == Servo::State::Locked;
+        }
+        CHECK(!everLocked, skew << " ppm never locks");
+    }
+    Master m;
+    m.skewPpm = 400.0;
+    Simulation sim(m, Network{}, 4.0, 9);
+    sim.runUntil(120);
+    CHECK(sim.measure().state == Servo::State::Locked, "400 ppm locks");
+}
+
+// #54: Syncs stopping while the master still announces
+void testSyncTimeout() {
+    std::cout << "Locked without Syncs for 3 intervals (at least 1 s): holdover" << std::endl;
+    // 1 Sync/s: the last at about 119.0 s, timeout 3 s
+    Simulation slow(Master{}, Network{}, 1.0, 10);
+    slow.runUntil(120);
+    CHECK(slow.measure().state == Servo::State::Locked, "1 Sync/s: locked");
+    slow.skipTo(121.5);
+    slow.servo.tick(slow.nowNs());
+    CHECK(slow.measure().state == Servo::State::Locked, "2.5 s after the last Sync: still locked");
+    slow.skipTo(122.5);
+    slow.servo.tick(slow.nowNs());
+    CHECK(slow.measure().state == Servo::State::Holdover, "3.5 s after it: holdover");
+
+    // 4 Sync/s: 3 intervals is 0.75 s, so the 1 s floor applies
+    Simulation fast(Master{}, Network{}, 4.0, 10);
+    fast.runUntil(120);
+    const uint32_t generation = fast.measure().generation;
+    fast.skipTo(120.6);
+    fast.servo.tick(fast.nowNs());
+    CHECK(fast.measure().state == Servo::State::Locked, "4 Sync/s, 0.85 s after the last Sync: still locked");
+    fast.skipTo(121.5);
+    fast.servo.tick(fast.nowNs());
+    CHECK(fast.measure().state == Servo::State::Holdover, "1.75 s after it: holdover");
+    fast.runUntil(170);
+    const Run back = fast.measure();
+    CHECK(back.state == Servo::State::Locked && back.generation == generation,
+          "Syncs returning resume the same timeline");
+}
+
+// #54: holdover does not last for ever
+void testHoldoverEnds() {
+    std::cout << "Holdover gives up after 60 s: acquiring, on a new timeline" << std::endl;
+    Simulation sim(Master{}, Network{}, 4.0, 12);
+    sim.runUntil(120);
+    const uint32_t generation = sim.measure().generation;
+    sim.servo.holdover(sim.nowNs());
+    sim.skipTo(179);
+    sim.servo.tick(sim.nowNs());
+    CHECK(sim.measure().state == Servo::State::Holdover, "59 s: still in holdover");
+    sim.skipTo(181);
+    sim.servo.tick(sim.nowNs());
+    const Run after = sim.measure();
+    CHECK(after.state == Servo::State::Acquiring && !sim.servo.estimate() && after.generation == generation + 1,
+          "61 s: acquiring, no estimate, a new timeline (state " << int(after.state) << ", generation "
+                                                                    << after.generation << ")");
+    sim.runUntil(300);
+    CHECK(sim.measure().state == Servo::State::Locked, "and locks again when Syncs return");
 }
 
 // Over many networks, not one lucky run: once settled, the servo stays
@@ -339,6 +432,10 @@ int main() {
     testStaysLockedThroughBursts();
     testGrandmasterTimeStep();
     testHoldover();
+    testNoHoldoverBeforeLock();
+    testImplausibleRateNeverLocks();
+    testSyncTimeout();
+    testHoldoverEnds();
     testStaysLockedAndAccurate();
 
     std::cout << "\nPTP servo: " << checksPassed << " passed, " << checksFailed << " failed" << std::endl;
