@@ -145,6 +145,22 @@ void testRejectsBadPackets() {
     const auto announce = concat(header(0x0B, 44, 0, 0, kZeroCorrection, 1, 0x05, 0x01), std::vector<uint8_t>(10, 0));
     CHECK(!parse(announce.data(), announce.size()).has_value(), "an Announce without its body");
 
+    // nanoseconds counts within one second, so 1e9 or more is not a timestamp
+    const auto maxNanoseconds = concat(header(0x00, 44, 0x02, 0x00, kZeroCorrection, 1, 0x00, 0xFD), wingTimestamp(999999999));
+    CHECK(parse(maxNanoseconds.data(), maxNanoseconds.size()).has_value(), "nanoseconds 999999999");
+    for (uint32_t nanoseconds : {1000000000u, 0xFFFFFFFFu}) {
+        const auto sync = concat(header(0x00, 44, 0x02, 0x00, kZeroCorrection, 1, 0x00, 0xFD), wingTimestamp(nanoseconds));
+        CHECK(!parse(sync.data(), sync.size()).has_value(), "a Sync with nanoseconds " << nanoseconds);
+        const auto followUp = concat(header(0x08, 44, 0, 0, kZeroCorrection, 1, 0x02, 0xFD), wingTimestamp(nanoseconds));
+        CHECK(!parse(followUp.data(), followUp.size()).has_value(), "a Follow_Up with nanoseconds " << nanoseconds);
+        auto delayResp = concat(header(0x09, 54, 0, 0, kZeroCorrection, 1, 0x03, 0x00), wingTimestamp(nanoseconds));
+        delayResp.insert(delayResp.end(), 10, 0x00);
+        CHECK(!parse(delayResp.data(), delayResp.size()).has_value(), "a Delay_Resp with nanoseconds " << nanoseconds);
+        auto announce = concat(header(0x0B, 64, 0, 0, kZeroCorrection, 1, 0x05, 0x01), wingTimestamp(nanoseconds));
+        announce.insert(announce.end(), 20, 0x00);
+        CHECK(!parse(announce.data(), announce.size()).has_value(), "an Announce with nanoseconds " << nanoseconds);
+    }
+
     // Message types we do not decode still parse their header (so a slave
     // can ignore them by type rather than see garbage)
     const auto signaling = concat(header(0x0C, 44, 0, 0, kZeroCorrection, 1, 0x05, 0x7F), std::vector<uint8_t>(10, 0));

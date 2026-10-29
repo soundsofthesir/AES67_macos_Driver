@@ -14,6 +14,7 @@ constexpr size_t kPortIdentityLength = 10;
 constexpr size_t kAnnounceLength = 64;
 constexpr size_t kDelayRespLength = kHeaderLength + kTimestampLength + kPortIdentityLength;  // 54
 constexpr size_t kEventLength = kHeaderLength + kTimestampLength;                            // 44
+constexpr uint32_t kNanosecondsPerSecond = 1000000000;
 
 // controlField values (version 1 compatibility; still sent by version 2 devices)
 constexpr uint8_t kControlSync = 0x00;
@@ -159,6 +160,9 @@ std::optional<Message> parse(const uint8_t* data, size_t length) {
         }
         default:
             break;  // header only
+    }
+    if (m.timestamp.nanoseconds >= kNanosecondsPerSecond) {
+        return std::nullopt;
     }
     return m;
 }
