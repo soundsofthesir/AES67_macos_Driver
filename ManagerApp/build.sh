@@ -24,28 +24,38 @@ echo "Building AES67 Manager..."
 
 # Compile Swift files - include all Views and Models
 # Note: SDPProcessor.swift disabled - needs compatibility fixes
-swiftc -o AES67Manager \
-  -target arm64-apple-macos13.0 \
-  -sdk "$(xcrun --show-sdk-path --sdk macosx)" \
-  -framework SwiftUI \
-  -framework Foundation \
-  -framework AppKit \
-  -framework CoreAudio \
-  -framework UniformTypeIdentifiers \
-  Models/StreamInfo.swift \
-  Models/DriverManager.swift \
-  Models/MenuBarManager.swift \
-  Views/ContentView.swift \
-  Views/StreamListView.swift \
-  Views/StreamDetailView.swift \
-  Views/AddStreamView.swift \
-  Views/SettingsView.swift \
-  Views/ChannelMappingView.swift \
-  Views/ChannelMapDiagnosticView.swift \
-  Views/QuickStartView.swift \
-  Views/PTPDiagnosticView.swift \
-  Views/AudioStatusView.swift \
+SOURCES=(
+  Models/StreamInfo.swift
+  Models/DriverManager.swift
+  Models/MenuBarManager.swift
+  Views/ContentView.swift
+  Views/StreamListView.swift
+  Views/StreamDetailView.swift
+  Views/AddStreamView.swift
+  Views/SettingsView.swift
+  Views/ChannelMappingView.swift
+  Views/ChannelMapDiagnosticView.swift
+  Views/QuickStartView.swift
+  Views/PTPDiagnosticView.swift
+  Views/AudioStatusView.swift
   AES67ManagerApp.swift
+)
+
+# Universal binary, like the driver
+SDK="$(xcrun --show-sdk-path --sdk macosx)"
+for ARCH in arm64 x86_64; do
+  swiftc -o "AES67Manager-$ARCH" \
+    -target "$ARCH-apple-macos13.0" \
+    -sdk "$SDK" \
+    -framework SwiftUI \
+    -framework Foundation \
+    -framework AppKit \
+    -framework CoreAudio \
+    -framework UniformTypeIdentifiers \
+    "${SOURCES[@]}"
+done
+lipo -create -output AES67Manager AES67Manager-arm64 AES67Manager-x86_64
+rm AES67Manager-arm64 AES67Manager-x86_64
 
 # Create app bundle structure
 echo "Creating app bundle..."
