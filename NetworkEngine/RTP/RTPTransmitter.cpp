@@ -232,10 +232,10 @@ void RTPTransmitter::sendPosition(int64_t position, uint32_t timestamp) {
     uint8_t* payload = payloadBuffer_.data();
     size_t payloadSize = 0;
     if (sdp_.encoding == "L16") {
-        encodeL16(audioBuffer_.data(), frames, payload);
+        RTP::L16Codec::encode(audioBuffer_.data(), frames * sdp_.numChannels, payload);
         payloadSize = frames * sdp_.numChannels * 2;
     } else if (sdp_.encoding == "L24") {
-        encodeL24(audioBuffer_.data(), frames, payload);
+        RTP::L24Codec::encode(audioBuffer_.data(), frames * sdp_.numChannels, payload);
         payloadSize = frames * sdp_.numChannels * 3;
     } else {
         return;  // rejected at start-up by StreamManager validation
@@ -293,37 +293,6 @@ void RTPTransmitter::resetStatistics() {
     stats_.latencyNs.store(0, std::memory_order_relaxed);
     stats_.bytesReceived.store(0, std::memory_order_relaxed);
     stats_.bytesSent.store(0, std::memory_order_relaxed);
-}
-
-void RTPTransmitter::encodeL16(const float* audio, size_t frameCount, uint8_t* payload) {
-    // L16: 16-bit big-endian signed PCM
-    const size_t totalSamples = frameCount * sdp_.numChannels;
-
-    for (size_t i = 0; i < totalSamples; ++i) {
-        // Clamp to [-1.0, 1.0] and convert to int16
-        float value = std::max(-1.0f, std::min(1.0f, audio[i]));
-        int16_t pcmSample = static_cast<int16_t>(value * 32767.0f);
-
-        // Big-endian encoding
-        payload[i * 2 + 0] = (pcmSample >> 8) & 0xFF;
-        payload[i * 2 + 1] = pcmSample & 0xFF;
-    }
-}
-
-void RTPTransmitter::encodeL24(const float* audio, size_t frameCount, uint8_t* payload) {
-    // L24: 24-bit big-endian signed PCM
-    const size_t totalSamples = frameCount * sdp_.numChannels;
-
-    for (size_t i = 0; i < totalSamples; ++i) {
-        // Clamp to [-1.0, 1.0] and convert to int32 (24-bit range)
-        float value = std::max(-1.0f, std::min(1.0f, audio[i]));
-        int32_t pcmSample = static_cast<int32_t>(value * 8388607.0f); // 2^23 - 1
-
-        // Big-endian 24-bit encoding (only write 3 bytes)
-        payload[i * 3 + 0] = (pcmSample >> 16) & 0xFF;
-        payload[i * 3 + 1] = (pcmSample >> 8) & 0xFF;
-        payload[i * 3 + 2] = pcmSample & 0xFF;
-    }
 }
 
 void RTPTransmitter::sendPacket(const uint8_t* payload, size_t payloadSize, uint32_t timestamp) {

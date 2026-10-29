@@ -11,6 +11,8 @@
 #include <cassert>
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 using namespace AES67;
 using namespace AES67::RTP;
@@ -200,6 +202,33 @@ bool testL24EncodingPrecision() {
         float diff = std::abs(decoded[i] - audio[i]);
         TEST_ASSERT(diff < 0.001f, "L24 round-trip high precision");
     }
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testNonFiniteSamples() {
+    std::cout << "Test: NaN encodes as silence, infinities as full scale (#60)... ";
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const float audio[6] = {nan, -nan, inf, -inf, 2.0f, -2.0f};
+    uint8_t l16[12];
+    uint8_t l24[18];
+    L16Codec::encode(audio, 6, l16);
+    L24Codec::encode(audio, 6, l24);
+
+    const auto pcm16 = [&](int i) { return static_cast<int16_t>((l16[i * 2] << 8) | l16[i * 2 + 1]); };
+    const auto pcm24 = [&](int i) {
+        const uint32_t raw = (uint32_t(l24[i * 3]) << 24) | (uint32_t(l24[i * 3 + 1]) << 16) | (uint32_t(l24[i * 3 + 2]) << 8);
+        return static_cast<int32_t>(raw) >> 8;
+    };
+    TEST_ASSERT(pcm16(0) == 0 && pcm16(1) == 0, "L16: NaN and -NaN should encode as 0");
+    TEST_ASSERT(pcm24(0) == 0 && pcm24(1) == 0, "L24: NaN and -NaN should encode as 0");
+    TEST_ASSERT(pcm16(2) == 32767 && pcm16(3) == -32767 && pcm16(4) == 32767 && pcm16(5) == -32767,
+                "L16: infinities and +/-2.0 should clip to full scale");
+    TEST_ASSERT(pcm24(2) == 8388607 && pcm24(3) == -8388607 && pcm24(4) == 8388607 && pcm24(5) == -8388607,
+                "L24: infinities and +/-2.0 should clip to full scale");
 
     std::cout << "PASS" << std::endl;
     return true;
@@ -414,6 +443,7 @@ int main() {
     std::cout << "--------------------" << std::endl;
     testL16EncodingPrecision();
     testL24EncodingPrecision();
+    testNonFiniteSamples();
     std::cout << std::endl;
 
     std::cout << "Payload Size Tests:" << std::endl;

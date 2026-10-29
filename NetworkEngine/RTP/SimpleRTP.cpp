@@ -321,14 +321,24 @@ bool RTPSocket::isValid() const {
     return error == 0;
 }
 
+namespace {
+
+/// A sample clipped to [-1, 1]. NaN, for which every comparison in a clamp
+/// is false and so came out as +1, is silence (#60).
+float clipSample(float sample) {
+    if (std::isnan(sample)) return 0.0f;
+    return std::max(-1.0f, std::min(1.0f, sample));
+}
+
+} // namespace
+
 //
 // L16Codec Implementation
 //
 
 void L16Codec::encode(const float* samples, size_t numSamples, uint8_t* output) {
     for (size_t i = 0; i < numSamples; i++) {
-        // Clamp float to [-1.0, 1.0]
-        float sample = std::max(-1.0f, std::min(1.0f, samples[i]));
+        const float sample = clipSample(samples[i]);
 
         // Convert to 16-bit signed integer
         int16_t pcm = static_cast<int16_t>(sample * 32767.0f);
@@ -359,8 +369,7 @@ void L16Codec::decode(const uint8_t* input, size_t numBytes, float* samples) {
 
 void L24Codec::encode(const float* samples, size_t numSamples, uint8_t* output) {
     for (size_t i = 0; i < numSamples; i++) {
-        // Clamp float to [-1.0, 1.0]
-        float sample = std::max(-1.0f, std::min(1.0f, samples[i]));
+        const float sample = clipSample(samples[i]);
 
         // Convert to 24-bit signed integer
         int32_t pcm = static_cast<int32_t>(sample * 8388607.0f); // 2^23 - 1

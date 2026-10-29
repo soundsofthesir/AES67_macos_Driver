@@ -94,10 +94,6 @@ private:
     void transmitLoop();
     void sendPosition(int64_t position, uint32_t timestamp);
 
-    // Audio encoding
-    void encodeL16(const float* audio, size_t frameCount, uint8_t* payload);
-    void encodeL24(const float* audio, size_t frameCount, uint8_t* payload);
-
     // Send RTP packet
     void sendPacket(const uint8_t* payload, size_t payloadSize, uint32_t timestamp);
 
