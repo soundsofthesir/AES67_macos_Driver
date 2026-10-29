@@ -130,8 +130,18 @@ void AES67Device::Initialize() {
 }
 
 AES67Device::~AES67Device() {
-    // First: its thread writes the media clock and notifies the HAL
-    ptpClock_.reset();
+    // First: its thread writes the media clock and notifies the HAL. Stopped
+    // before ptpClock_ is cleared, as its listener (OnPtpChanged) reads
+    // ptpClock_ (#58); cleared under clockWriteMutex_, as receive threads
+    // read it in ApplyRecoveredRate.
+    if (ptpClock_) {
+        ptpClock_->stop();
+        std::unique_ptr<PtpClockSource> stopped;
+        {
+            std::lock_guard<std::mutex> lock(clockWriteMutex_);
+            stopped = std::move(ptpClock_);
+        }
+    }
 
     // Receivers reference mediaClock_, networkTime_ and rxRouting_, which are
     // declared after streamManager_ and so would be destroyed first
