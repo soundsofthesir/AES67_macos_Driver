@@ -79,8 +79,7 @@ bool TimeReceiver::start() {
     master_.reset();
     servoMaster_.reset();
     addresses_.clear();
-    pendingSync_.reset();
-    pendingFollowUp_.reset();
+    pairer_.reset();
     delaySentNs_.reset();
     logDelayInterval_ = 0;
     counters_ = Status{};
@@ -173,8 +172,7 @@ void TimeReceiver::onAnnounce(const Message& message, uint32_t sourceAddress) {
 void TimeReceiver::masterChanged() {
     const auto selected = bestMaster_->selected();
     master_ = selected ? std::optional<PortIdentity>(selected->sender) : std::nullopt;
-    pendingSync_.reset();
-    pendingFollowUp_.reset();
+    pairer_.reset();
     delaySentNs_.reset();
     if (!master_) {
         servo_->holdover();  // keep the line until a master returns
@@ -201,14 +199,10 @@ void TimeReceiver::onSync(const Message& message, uint64_t hostReceiveNs) {
         servoMaster_ = master_;
         return;
     }
-    if (pendingFollowUp_ && pendingFollowUp_->sequenceId == message.header.sequenceId) {
-        // The Follow_Up overtook its Sync
-        servo_->onSync(hostReceiveNs, pendingFollowUp_->preciseOriginNs, correction + pendingFollowUp_->correctionNs);
+    if (const auto sample = pairer_.onSync(message.header.sequenceId, hostReceiveNs, correction)) {
+        servo_->onSync(sample->hostReceiveNs, sample->preciseOriginNs, sample->correctionNs);
         servoMaster_ = master_;
-        pendingFollowUp_.reset();
-        return;
     }
-    pendingSync_ = PendingSync{message.header.sequenceId, hostReceiveNs, correction};
 }
 
 void TimeReceiver::onFollowUp(const Message& message) {
@@ -216,13 +210,10 @@ void TimeReceiver::onFollowUp(const Message& message) {
     ++counters_.followUps;
     const uint64_t precise = message.timestamp.totalNanoseconds();
     const double correction = message.header.correctionNanoseconds();
-    if (pendingSync_ && pendingSync_->sequenceId == message.header.sequenceId) {
-        servo_->onSync(pendingSync_->hostReceiveNs, precise, pendingSync_->correctionNs + correction);
+    if (const auto sample = pairer_.onFollowUp(message.header.sequenceId, precise, correction)) {
+        servo_->onSync(sample->hostReceiveNs, sample->preciseOriginNs, sample->correctionNs);
         servoMaster_ = master_;
-        pendingSync_.reset();
-        return;
     }
-    pendingFollowUp_ = PendingFollowUp{message.header.sequenceId, precise, correction};
 }
 
 void TimeReceiver::onDelayResp(const Message& message) {
