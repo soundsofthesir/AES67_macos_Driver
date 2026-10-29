@@ -1,104 +1,74 @@
 #include "AudioThreadPriority.h"
+#include "DebugLog.h"
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#include <mach/mach_time.h>
 #include <mach/thread_policy.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <sys/resource.h>
-#include <errno.h>
-#include <cstring>
-#include <cstdio>
+#include <algorithm>
+#include <cstdint>
 
 namespace AES67 {
 
-bool AudioThreadPriority::configureForRealTime() {
-    return configureThreadForRealTime(pthread_self());
+namespace {
+
+// The kernel refuses a computation below its minimum real-time quantum
+// (about 50 us) or above 50 ms
+constexpr std::chrono::nanoseconds kMinComputation = std::chrono::microseconds(50);
+constexpr std::chrono::nanoseconds kMaxComputation = std::chrono::milliseconds(50);
+
+uint32_t toAbsoluteTime(std::chrono::nanoseconds duration) {
+    mach_timebase_info_data_t timebase{};
+    mach_timebase_info(&timebase);
+    const auto ns = static_cast<uint64_t>(std::max<int64_t>(duration.count(), 0));
+    return static_cast<uint32_t>(std::min<uint64_t>(ns * timebase.denom / timebase.numer, UINT32_MAX));
 }
 
-bool AudioThreadPriority::configureThreadForRealTime(pthread_t thread) {
-    // On macOS, use mach thread policies for real-time audio
-    thread_extended_policy_data_t extendedPolicy;
-    thread_precedence_policy_data_t precedencePolicy;
-    thread_affinity_policy_data_t affinityPolicy;
+kern_return_t applyTimeConstraint(thread_act_t thread, std::chrono::nanoseconds period) {
+    const auto computation = std::clamp(period / 2, kMinComputation, kMaxComputation);
+    thread_time_constraint_policy_data_t policy{};
+    policy.period = toAbsoluteTime(period);
+    policy.computation = toAbsoluteTime(computation);
+    policy.constraint = toAbsoluteTime(std::max(period, computation));
+    policy.preemptible = TRUE;
+    return thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, reinterpret_cast<thread_policy_t>(&policy),
+                             THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+}
 
-    // Set extended policy for real-time constraints
-    extendedPolicy.timeshare = FALSE; // Don't timeshare - run at real-time priority
+// Out of timeshare at the highest precedence: what these threads used before
+// time-constraint, still far better than timeshare under load
+void applyFallback(thread_act_t thread) {
+    thread_extended_policy_data_t extended{};
+    extended.timeshare = FALSE;
+    thread_policy_set(thread, THREAD_EXTENDED_POLICY, reinterpret_cast<thread_policy_t>(&extended),
+                      THREAD_EXTENDED_POLICY_COUNT);
+    thread_precedence_policy_data_t precedence{};
+    precedence.importance = 63;
+    thread_policy_set(thread, THREAD_PRECEDENCE_POLICY, reinterpret_cast<thread_policy_t>(&precedence),
+                      THREAD_PRECEDENCE_POLICY_COUNT);
+}
 
-    kern_return_t result = thread_policy_set(
-        pthread_mach_thread_np(thread),
-        THREAD_EXTENDED_POLICY,
-        (thread_policy_t)&extendedPolicy,
-        THREAD_EXTENDED_POLICY_COUNT
-    );
+} // namespace
 
-    if (result != KERN_SUCCESS) {
-        fprintf(stderr, "AES67 AudioThreadPriority: THREAD_EXTENDED_POLICY failed (kern_return=%d: %s), falling back to nice -20\n",
-                result, mach_error_string(result));
-        // Fallback: try to set nice value
-        setpriority(PRIO_PROCESS, 0, -20);
-        return false;
+bool AudioThreadPriority::configureForRealTime(std::chrono::nanoseconds period) {
+    return configureThreadForRealTime(pthread_self(), period);
+}
+
+bool AudioThreadPriority::configureThreadForRealTime(pthread_t thread, std::chrono::nanoseconds period) {
+    const thread_act_t machThread = pthread_mach_thread_np(thread);
+    const kern_return_t result = applyTimeConstraint(machThread, period);
+    if (result == KERN_SUCCESS) {
+        return true;
     }
-
-    // Set precedence policy for priority
-    precedencePolicy.importance = 63; // High priority value (0-63)
-
-    result = thread_policy_set(
-        pthread_mach_thread_np(thread),
-        THREAD_PRECEDENCE_POLICY,
-        (thread_policy_t)&precedencePolicy,
-        THREAD_PRECEDENCE_POLICY_COUNT
-    );
-
-    if (result != KERN_SUCCESS) {
-        fprintf(stderr, "AES67 AudioThreadPriority: THREAD_PRECEDENCE_POLICY failed (kern_return=%d: %s)\n",
-                result, mach_error_string(result));
-        return false;
-    }
-
-    // Affinity is only a hint, and Apple Silicon does not support it at all
-    // (KERN_NOT_SUPPORTED), so it never decides success: the extended and
-    // precedence policies above are what make the thread real-time
-    affinityPolicy.affinity_tag = 0; // Use default affinity
-
-    result = thread_policy_set(
-        pthread_mach_thread_np(thread),
-        THREAD_AFFINITY_POLICY,
-        (thread_policy_t)&affinityPolicy,
-        THREAD_AFFINITY_POLICY_COUNT
-    );
-
-    if (result != KERN_SUCCESS && result != KERN_NOT_SUPPORTED) {
-        fprintf(stderr, "AES67 AudioThreadPriority: THREAD_AFFINITY_POLICY failed (kern_return=%d: %s) - non-critical\n",
-                result, mach_error_string(result));
-    }
-
-    return true;
+    AES67_LOGF("AudioThreadPriority: time-constraint policy refused (kern_return=%d: %s); using high precedence",
+               result, mach_error_string(result));
+    applyFallback(machThread);
+    return false;
 }
 
 void AudioThreadPriority::restoreNormalPriority() {
-    // Reset to normal scheduling
-    thread_extended_policy_data_t extendedPolicy;
-    extendedPolicy.timeshare = TRUE; // Timeshare - normal scheduling
-    
-    thread_policy_set(
-        mach_thread_self(),
-        THREAD_EXTENDED_POLICY,
-        (thread_policy_t)&extendedPolicy,
-        THREAD_EXTENDED_POLICY_COUNT
-    );
-    
-    // Restore normal nice value
-    setpriority(PRIO_PROCESS, 0, 0);
-}
-
-int AudioThreadPriority::getRecommendedSchedulingPolicy() {
-    // On macOS, we use Mach thread policies instead of POSIX scheduling
-    return SCHED_FIFO;  // This is for reference; actual implementation uses Mach
-}
-
-int AudioThreadPriority::getRecommendedPriority() {
-    // High priority for audio processing
-    return 63;  // Max priority for real-time audio on macOS
+    thread_standard_policy_data_t standard{};
+    thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_STANDARD_POLICY,
+                      reinterpret_cast<thread_policy_t>(&standard), THREAD_STANDARD_POLICY_COUNT);
 }
 
 } // namespace AES67

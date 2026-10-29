@@ -51,6 +51,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -1799,23 +1800,91 @@ void testIOStartStopLeavesStreamActivityToHAL() {
 } // namespace
 
 // ---------------------------------------------------------------------------
-// configureForRealTime must report success when the real-time policies are
-// applied. It used to return the result of THREAD_AFFINITY_POLICY, which Apple
-// Silicon never supports, so every receive thread logged a false failure.
+// Real-time threads get the time-constraint policy, with the period they ask
+// for (#62). The extended + precedence policy they had before still woke
+// about 115 us late on every timer, a whole packet at 125 us packet time.
+// configureForRealTime reports success only when the policy is applied.
 // ---------------------------------------------------------------------------
-void testRealTimePriorityReportsSuccess() {
-    std::cout << "Real-time thread priority reports success when applied" << std::endl;
-    bool reported = false;
+namespace {
+
+// The thread's time-constraint policy, or nullopt if it has none.
+std::optional<thread_time_constraint_policy_data_t> timeConstraintOf(thread_act_t thread) {
+    thread_time_constraint_policy_data_t policy{};
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
     boolean_t getDefault = FALSE;
-    thread_extended_policy_data_t extended{TRUE};
-    mach_msg_type_number_t count = THREAD_EXTENDED_POLICY_COUNT;
+    if (thread_policy_get(thread, THREAD_TIME_CONSTRAINT_POLICY, reinterpret_cast<thread_policy_t>(&policy), &count,
+                          &getDefault) != KERN_SUCCESS || getDefault) {
+        return std::nullopt;
+    }
+    return policy;
+}
+
+int64_t ticksToMicroseconds(uint32_t ticks) {
+    return static_cast<int64_t>(std::llround(static_cast<double>(ticks) / HostTimebase::current().ticksPerSecond() * 1e6));
+}
+
+// The time-constraint periods of every thread in this process, in microseconds, sorted.
+std::vector<int64_t> timeConstraintPeriods() {
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t count = 0;
+    std::vector<int64_t> periods;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return periods;
+    for (mach_msg_type_number_t i = 0; i < count; ++i) {
+        if (const auto policy = timeConstraintOf(threads[i])) periods.push_back(ticksToMicroseconds(policy->period));
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
+    std::sort(periods.begin(), periods.end());
+    return periods;
+}
+
+} // namespace
+
+void testRealTimePriorityReportsSuccess() {
+    std::cout << "#62: real-time threads get the time-constraint policy they ask for" << std::endl;
+    bool reported = false;
+    std::optional<thread_time_constraint_policy_data_t> applied;
+    std::optional<thread_time_constraint_policy_data_t> restored;
     std::thread([&] {
-        reported = AudioThreadPriority::configureForRealTime();
-        thread_policy_get(mach_thread_self(), THREAD_EXTENDED_POLICY,
-                          reinterpret_cast<thread_policy_t>(&extended), &count, &getDefault);
+        reported = AudioThreadPriority::configureForRealTime(std::chrono::microseconds(250));
+        applied = timeConstraintOf(pthread_mach_thread_np(pthread_self()));
+        AudioThreadPriority::restoreNormalPriority();
+        restored = timeConstraintOf(pthread_mach_thread_np(pthread_self()));
     }).join();
-    CHECK(!extended.timeshare, "the thread should have left time-sharing");
     CHECK(reported, "configureForRealTime should report the success");
+    CHECK(applied && ticksToMicroseconds(applied->period) == 250 && applied->computation <= applied->constraint &&
+              applied->constraint <= applied->period && applied->computation > 0,
+          "the thread should run with a 250 us time-constraint policy (period "
+              << (applied ? ticksToMicroseconds(applied->period) : -1) << " us)");
+    CHECK(!restored, "restoreNormalPriority should return the thread to the standard policy");
+
+    // The receive and transmit threads, at their packet time (capped at the 1 ms they poll at)
+    useEmptyConfig("rtpolicy");
+    const std::vector<int64_t> before = timeConstraintPeriods();
+    RxHarness harness;
+    TxRouting txRouting;
+    {
+        StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+        SDPSession fast = makeRxSDP("239.69.99.140", 55170, 2);
+        fast.ptime = 0.125;
+        fast.framecount = 6;
+        CHECK(!manager.addStream(fast, makeMapping(2, 0)).isNull(), "a 125 us RX stream should be added");
+        CHECK(!manager.createTxStream("RT TX", "239.69.99.141", 55172, 2, makeMapping(2, 0), kHostOnly).isNull(),
+              "a TX stream should be created");
+        manager.setIOActive(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        std::vector<int64_t> added = timeConstraintPeriods();
+        for (int64_t period : before) {
+            const auto it = std::find(added.begin(), added.end(), period);
+            if (it != added.end()) added.erase(it);
+        }
+        std::ostringstream periods;
+        for (int64_t period : added) periods << period << " ";
+        CHECK(added == (std::vector<int64_t>{125, 1000}),
+              "the RX thread runs at 125 us and the TX thread at 1000 us (got: " << periods.str() << ")");
+        manager.setIOActive(false);
+    }
 }
 
 int main() {

@@ -2,44 +2,42 @@
 #define AUDIO_THREAD_PRIORITY_H
 
 #include <pthread.h>
-#include <sched.h>
+#include <chrono>
 
 namespace AES67 {
 
 /**
- * Utility class to manage real-time audio thread priorities
- * 
- * Critical for preventing audio dropouts due to thread preemption
+ * Real-time scheduling for the threads that send and receive audio packets.
+ *
+ * Only ever changes the calling thread: never the process, which inside
+ * coreaudiod is the whole audio server.
  */
 class AudioThreadPriority {
 public:
+    /// How often a thread wakes when its caller gives no period.
+    static constexpr std::chrono::nanoseconds kDefaultPeriod = std::chrono::milliseconds(1);
+
     /**
-     * Configure the current thread for real-time audio processing
-     * @return true if successful, false otherwise
+     * Give the current thread the time-constraint (real-time) policy for a
+     * thread that wakes every `period`, using up to half of it. Timeshare
+     * threads, even at the highest precedence, wake about 115 us after their
+     * deadline (#62); time-constraint threads wake within a few.
+     *
+     * If the kernel refuses it, the thread falls back to leaving timeshare at
+     * the highest precedence.
+     * @return true if the time-constraint policy was applied
      */
-    static bool configureForRealTime();
-    
+    static bool configureForRealTime(std::chrono::nanoseconds period = kDefaultPeriod);
+
     /**
-     * Configure a specific thread for real-time audio processing
-     * @param thread Thread to configure
-     * @return true if successful, false otherwise
+     * Configure a specific thread; see configureForRealTime().
      */
-    static bool configureThreadForRealTime(pthread_t thread);
-    
+    static bool configureThreadForRealTime(pthread_t thread, std::chrono::nanoseconds period = kDefaultPeriod);
+
     /**
-     * Restore normal priority to the current thread
+     * Return the current thread to the standard (timeshare) policy.
      */
     static void restoreNormalPriority();
-    
-    /**
-     * Get the recommended scheduling policy for audio threads
-     */
-    static int getRecommendedSchedulingPolicy();
-    
-    /**
-     * Get the recommended priority for audio threads
-     */
-    static int getRecommendedPriority();
 };
 
 } // namespace AES67
