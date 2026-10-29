@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -80,6 +81,7 @@ void SAPAnnouncer::announce(const StreamID& id, const std::string& sdp, const st
         Session session{sdp, interfaceAddress, ttl, std::chrono::steady_clock::now() + jitteredInterval()};
         send(session, false);
         sessions_[id] = std::move(session);
+        closeUnusedSockets();  // the session's old address, if it moved
     }
     wake_.notify_all();
 }
@@ -92,6 +94,7 @@ void SAPAnnouncer::withdraw(const StreamID& id) {
     }
     send(it->second, true);
     sessions_.erase(it);
+    closeUnusedSockets();
 }
 
 size_t SAPAnnouncer::sessionCount() const {
@@ -152,6 +155,22 @@ int SAPAnnouncer::socketFor(const std::string& interfaceAddress, uint8_t ttl) {
     }
     sockets_[key] = fd;
     return fd;
+}
+
+void SAPAnnouncer::closeUnusedSockets() {
+    // An interface change gives a session a new address; without this each
+    // address it had been on kept a socket open (#72)
+    for (auto it = sockets_.begin(); it != sockets_.end();) {
+        const bool used = std::any_of(sessions_.begin(), sessions_.end(), [&](const auto& entry) {
+            return std::make_pair(entry.second.interfaceAddress, entry.second.ttl) == it->first;
+        });
+        if (used) {
+            ++it;
+        } else {
+            ::close(it->second);
+            it = sockets_.erase(it);
+        }
+    }
 }
 
 void SAPAnnouncer::send(const Session& session, bool deletion) {
