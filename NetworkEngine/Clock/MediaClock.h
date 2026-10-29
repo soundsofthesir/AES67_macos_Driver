@@ -23,9 +23,14 @@ struct MediaPosition {
     double fraction{0.0};  // [0, 1)
 };
 
-/// Lock-free media clock. One writer (the active clock source) publishes;
-/// any number of readers, including the real-time IO thread, take snapshots
-/// without blocking (seqlock).
+/// Lock-free media clock. One writer at a time (the active clock source)
+/// publishes; any number of readers, including the real-time IO thread, take
+/// snapshots without blocking.
+///
+/// A seqcount latch: two copies of the state, which the writer updates one
+/// after the other while readers read the other one. A writer stopped
+/// part-way never holds readers up, however low its priority (#61); a reader
+/// only retries if the writer moved on while it was reading.
 class MediaClock {
 public:
     /// One published state of the clock. Pure value: safe to use after the
@@ -70,19 +75,13 @@ public:
         return sampleRate * rateRatio / timebase.ticksPerSecond();
     }
 
-    /// Real-time safe. Retries only while a publish is in progress.
+    /// Real-time safe. Retries only if a publish completed half while reading.
     Snapshot snapshot() const noexcept {
         for (;;) {
             const uint32_t before = sequence_.load(std::memory_order_acquire);
-            Snapshot s;
-            s.anchorHost = anchorHost_.load(std::memory_order_relaxed);
-            s.anchorSample = anchorSample_.load(std::memory_order_relaxed);
-            s.anchorFraction = anchorFraction_.load(std::memory_order_relaxed);
-            s.samplesPerTick = samplesPerTick_.load(std::memory_order_relaxed);
-            s.origin = origin_.load(std::memory_order_relaxed);
-            s.generation = generation_.load(std::memory_order_relaxed);
+            const Snapshot s = slots_[before & 1u].load();
             std::atomic_thread_fence(std::memory_order_acquire);
-            if ((before & 1u) == 0 && sequence_.load(std::memory_order_relaxed) == before) {
+            if (sequence_.load(std::memory_order_relaxed) == before) {
                 return s;
             }
         }
@@ -123,30 +122,53 @@ private:
     }
 
     uint32_t nextGeneration() const noexcept {
-        const uint32_t next = generation_.load(std::memory_order_relaxed) + 1;
+        const uint32_t next = snapshot().generation + 1;
         return next == 0 ? 1 : next;  // 0 is reserved for "never set"
     }
 
     void publish(const Snapshot& s) noexcept {
+        // Between publishes the sequence is even and readers use slot 0
         const uint32_t sequence = sequence_.load(std::memory_order_relaxed);
-        sequence_.store(sequence + 1, std::memory_order_relaxed);  // odd: publish in progress
+        sequence_.store(sequence + 1, std::memory_order_release);  // readers move to slot 1
         std::atomic_thread_fence(std::memory_order_release);
-        anchorHost_.store(s.anchorHost, std::memory_order_relaxed);
-        anchorSample_.store(s.anchorSample, std::memory_order_relaxed);
-        anchorFraction_.store(s.anchorFraction, std::memory_order_relaxed);
-        samplesPerTick_.store(s.samplesPerTick, std::memory_order_relaxed);
-        origin_.store(s.origin, std::memory_order_relaxed);
-        generation_.store(s.generation, std::memory_order_relaxed);
-        sequence_.store(sequence + 2, std::memory_order_release);  // even: stable
+        slots_[0].store(s);
+        sequence_.store(sequence + 2, std::memory_order_release);  // and back to slot 0
+        std::atomic_thread_fence(std::memory_order_release);
+        slots_[1].store(s);
     }
 
+    /// One copy of the state, field by field (readers may race the writer on it)
+    struct Slot {
+        std::atomic<uint64_t> anchorHost{0};
+        std::atomic<int64_t> anchorSample{0};
+        std::atomic<double> anchorFraction{0.0};
+        std::atomic<double> samplesPerTick{0.0};
+        std::atomic<int64_t> origin{0};
+        std::atomic<uint32_t> generation{0};
+
+        Snapshot load() const noexcept {
+            Snapshot s;
+            s.anchorHost = anchorHost.load(std::memory_order_relaxed);
+            s.anchorSample = anchorSample.load(std::memory_order_relaxed);
+            s.anchorFraction = anchorFraction.load(std::memory_order_relaxed);
+            s.samplesPerTick = samplesPerTick.load(std::memory_order_relaxed);
+            s.origin = origin.load(std::memory_order_relaxed);
+            s.generation = generation.load(std::memory_order_relaxed);
+            return s;
+        }
+
+        void store(const Snapshot& s) noexcept {
+            anchorHost.store(s.anchorHost, std::memory_order_relaxed);
+            anchorSample.store(s.anchorSample, std::memory_order_relaxed);
+            anchorFraction.store(s.anchorFraction, std::memory_order_relaxed);
+            samplesPerTick.store(s.samplesPerTick, std::memory_order_relaxed);
+            origin.store(s.origin, std::memory_order_relaxed);
+            generation.store(s.generation, std::memory_order_relaxed);
+        }
+    };
+
     std::atomic<uint32_t> sequence_{0};
-    std::atomic<uint64_t> anchorHost_{0};
-    std::atomic<int64_t> anchorSample_{0};
-    std::atomic<double> anchorFraction_{0.0};
-    std::atomic<double> samplesPerTick_{0.0};
-    std::atomic<int64_t> origin_{0};
-    std::atomic<uint32_t> generation_{0};
+    Slot slots_[2];
 };
 
 } // namespace AES67

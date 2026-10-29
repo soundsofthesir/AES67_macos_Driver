@@ -10,6 +10,9 @@
 #include "../NetworkEngine/Clock/MediaClock.h"
 #include "../NetworkEngine/Clock/DeviceTimeline.h"
 #include "../NetworkEngine/Clock/TimestampedAudioBuffer.h"
+#include <mach/mach.h>
+#include <pthread.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -180,6 +183,79 @@ void testMediaClockConcurrentReads() {
 
     CHECK(reads.load() > 1000, "readers should have run (got " << reads.load() << " reads)");
     CHECK(torn.load() == 0, "no reader should see a torn snapshot (got " << torn.load() << ")");
+}
+
+// The IO thread reads the clock; its writers (PTP, stream clock recovery, the
+// HAL's control thread) are not real-time. A writer stopped part-way through a
+// publish used to keep every reader spinning until it ran again (#61): a
+// reader must return at once, with a consistent snapshot, whenever the writer
+// stops. The writer is stopped at arbitrary points with thread_suspend.
+void testSnapshotWithAStalledWriter() {
+    std::cout << "#61: MediaClock reads never wait for a stalled writer" << std::endl;
+
+    MediaClock clock;
+    clock.reset(1, 3, 2.0);
+    std::atomic<bool> writing{true};
+    std::thread writer([&] {
+        for (uint64_t host = 2; writing.load(std::memory_order_relaxed); ++host) {
+            clock.reset(host, static_cast<int64_t>(3 * host), 2.0 * static_cast<double>(host));
+        }
+    });
+    const thread_act_t writerThread = pthread_mach_thread_np(writer.native_handle());
+
+    // Reads on request on their own thread, so a reader stuck behind the
+    // writer is seen as a timeout rather than hanging the test
+    std::atomic<int> requests{0};
+    std::atomic<int> done{0};
+    std::atomic<int> torn{0};
+    std::atomic<int> stale{0};
+    std::atomic<bool> reading{true};
+    std::thread reader([&] {
+        int served = 0;
+        uint64_t latest = 1;
+        while (reading.load()) {
+            if (requests.load() == served) {
+                std::this_thread::yield();
+                continue;
+            }
+            const auto s = clock.snapshot();
+            if (s.anchorSample != static_cast<int64_t>(3 * s.anchorHost) ||
+                s.samplesPerTick != 2.0 * static_cast<double>(s.anchorHost)) {
+                torn.fetch_add(1);
+            }
+            // A state the writer published, never one older than already read
+            if (!s.valid() || s.anchorHost < latest) {
+                stale.fetch_add(1);
+            }
+            latest = std::max(latest, s.anchorHost);
+            done.store(++served);
+        }
+    });
+
+    std::mt19937 random(61);
+    std::uniform_int_distribution<int> gapMicroseconds(0, 50);
+    int waited = 0;
+    constexpr int kStalls = 2000;
+    for (int i = 0; i < kStalls; ++i) {
+        std::this_thread::sleep_for(std::chrono::microseconds(gapMicroseconds(random)));
+        thread_suspend(writerThread);
+        requests.store(i + 1);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+        while (done.load() != i + 1 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        if (done.load() != i + 1) ++waited;
+        thread_resume(writerThread);
+        while (done.load() != i + 1) std::this_thread::yield();
+    }
+    writing = false;
+    reading = false;
+    writer.join();
+    reader.join();
+
+    CHECK(waited == 0, "no read should wait for the stopped writer (" << waited << " of " << kStalls << " did)");
+    CHECK(torn.load() == 0, "no read should be torn (got " << torn.load() << ")");
+    CHECK(stale.load() == 0, "every read should be a published state, never an older one (got " << stale.load() << ")");
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +515,7 @@ int main() {
     testMediaClockPrecisionAtPTPScale();
     testMediaClockUpdates();
     testMediaClockConcurrentReads();
+    testSnapshotWithAStalledWriter();
     testTimelineOrigin();
     testZeroTimeStamps();
     testBufferReadWrite();
