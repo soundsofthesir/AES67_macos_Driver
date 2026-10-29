@@ -14,6 +14,7 @@
 #include "../../Driver/AudioThreadPriority.h"
 #include <thread>
 #include <atomic>
+#include <utility>
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -108,6 +109,7 @@ private:
     ChannelMapping mapping_;
     RxContext context_;
     size_t bytesPerSample_;
+    std::pair<size_t, size_t> packetFrames_;  // frames a packet may hold, fewest and most
 
     // RTP socket
     RTP::RTPSocket rtpSocket_;
@@ -118,6 +120,17 @@ private:
     // Receive thread state
     std::unique_ptr<RtpPlacement> placement_;
     uint32_t lastClockGeneration_{0};
+
+    // The last packet seen (receive thread only): the next one in sequence
+    // must step the timestamp by its frame count
+    struct LastPacket {
+        bool valid{false};
+        uint32_t ssrc{0};
+        uint16_t sequence{0};
+        uint32_t timestamp{0};
+        uint32_t frames{0};
+    };
+    LastPacket lastPacket_;
     int64_t lastNetworkOffset_{NetworkTimeMapping::kUnset};  // shared mapping seen by the last packet
     int64_t linkOffsetFrames_{0};                            // fixed for this run (set by start)
     std::vector<float> decodeBuffer_;

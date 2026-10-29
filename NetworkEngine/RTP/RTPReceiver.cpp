@@ -9,6 +9,7 @@
 #include "../Clock/HostTime.h"
 #include "../../Driver/DebugLog.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -24,6 +25,19 @@ size_t nextPowerOfTwo(size_t value) {
     return power;
 }
 
+/// The frames a packet of this stream may hold: one packet time's worth.
+/// Where that isn't whole (1 ms at 44.1 kHz is 44.1) senders alternate the
+/// two counts either side; 333 us at 48 kHz (15.98) is always 16.
+std::pair<size_t, size_t> packetFrameRange(const SDPSession& sdp) {
+    const double exact = static_cast<double>(sdp.sampleRate) * sdp.ptime / 1000.0;
+    const double nearest = std::round(exact);
+    if (exact < 1.0 || std::fabs(exact - nearest) < 0.05) {
+        const size_t frames = framesPerPacket(sdp);
+        return {frames, frames};
+    }
+    return {static_cast<size_t>(std::floor(exact)), static_cast<size_t>(std::ceil(exact))};
+}
+
 } // namespace
 
 RTPReceiver::RTPReceiver(
@@ -36,6 +50,7 @@ RTPReceiver::RTPReceiver(
     , mapping_(mapping)
     , context_(context)
     , bytesPerSample_(sdp.encoding == "L16" ? 2 : 3)
+    , packetFrames_(packetFrameRange(sdp))
     , networkInterface_(networkInterface)
 {
     // The interface is resolved at each start(), never here: its address or
@@ -100,6 +115,7 @@ bool RTPReceiver::start() {
     lastNetworkOffset_ = NetworkTimeMapping::kUnset;
     placement_ = std::make_unique<RtpPlacement>(placementConfig, context_.networkTime);
     lastClockGeneration_ = 0;
+    lastPacket_ = LastPacket{};
     decodeBuffer_.assign(kMaxFramesPerPacket * sdp_.numChannels, 0.0f);
 
     if (!context_.routing.publish(buffer_.get(), static_cast<uint32_t>(mapping_.deviceChannelStart))) {
@@ -256,17 +272,31 @@ void RTPReceiver::receiveLoop() {
 }
 
 void RTPReceiver::processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHostTime) {
+    // Exactly the stream's channels for one packet time (#59): the payload
+    // alone can't tell 24 frames of 16 channels from 48 of 8
     const size_t bytesPerFrame = bytesPerSample_ * sdp_.numChannels;
     const size_t frames = bytesPerFrame > 0 ? packet.payloadSize / bytesPerFrame : 0;
+    const bool sizeMatches = bytesPerFrame > 0 && packet.payloadSize % bytesPerFrame == 0 &&
+                             frames >= packetFrames_.first && frames <= packetFrames_.second &&
+                             frames <= kMaxFramesPerPacket;
+    // ...which needs the timestamps: the packet after another from the same
+    // source must start where that one's frames end
+    const LastPacket previous = lastPacket_;
+    lastPacket_ = LastPacket{true, packet.header.ssrc, packet.header.sequenceNumber, packet.header.timestamp,
+                             static_cast<uint32_t>(frames)};
+    const bool follows = previous.valid && previous.ssrc == packet.header.ssrc &&
+                         static_cast<uint16_t>(previous.sequence + 1) == packet.header.sequenceNumber;
+    const bool stepMatches = !follows || packet.header.timestamp - previous.timestamp == previous.frames;
 
-    if (!validatePacket(packet) || !packet.payload || frames == 0 || frames > kMaxFramesPerPacket) {
+    if (!validatePacket(packet) || !packet.payload || !sizeMatches || !stepMatches) {
         uint64_t count = stats_.malformedPackets.fetch_add(1, std::memory_order_relaxed) + 1;
         // Log first occurrence and then every 100th to avoid flooding
         if (count == 1 || count % 100 == 0) {
-            AES67_LOGF("RTPReceiver: malformed packet #%llu (ver=%u pt=%u size=%zu, expected pt=%u) stream=%s",
-                       (unsigned long long)count, packet.header.version,
-                       packet.header.payloadType, packet.payloadSize,
-                       sdp_.payloadType, sdp_.sessionName.c_str());
+            AES67_LOGF("RTPReceiver: malformed packet #%llu (ver=%u pt=%u size=%zu; expected pt=%u, %zu-%zu frames "
+                       "of %u channels) stream=%s",
+                       (unsigned long long)count, packet.header.version, packet.header.payloadType,
+                       packet.payloadSize, sdp_.payloadType, packetFrames_.first, packetFrames_.second,
+                       sdp_.numChannels, sdp_.sessionName.c_str());
         }
         return;
     }

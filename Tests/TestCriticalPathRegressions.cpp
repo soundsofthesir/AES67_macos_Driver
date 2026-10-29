@@ -1661,6 +1661,67 @@ void testDuplicateEntryIsSavedOnce() {
 // Receive path (step 2 phase 2): audio is placed by RTP timestamp. Tests
 // judge the stream as heard, from its first to its last non-silent sample.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// A packet must hold the stream's channels for one packet time (#59). Its
+// frame count used to be whatever the payload divided into, so a 16-channel
+// sender into an 8-channel stream was decoded as garbage (1152 bytes is 24
+// frames of 16 channels or 48 of 8: only the RTP timestamps, stepping by 24,
+// tell them apart, so the first such packet still gets through). At 44.1 kHz
+// and 1 ms a packet is 44 or 45 frames, so both are accepted.
+// ---------------------------------------------------------------------------
+void testPacketsMustMatchTheStream() {
+    std::cout << "#59: packets that don't hold the stream's channels for one packet time are dropped" << std::endl;
+    struct Case {
+        const char* what;
+        uint32_t sampleRate;
+        uint16_t sentChannels;
+        size_t frames;
+        size_t extraBytes;
+        bool accepted;
+        uint64_t firstAccepted;  // packets let through before the timestamps show the mismatch
+    };
+    const Case cases[] = {
+        {"8 channels x 48 frames", 48000, 8, 48, 0, true, 0},
+        {"16 channels x 24 frames (the same 1152 bytes)", 48000, 16, 24, 0, false, 1},
+        {"8 channels x 24 frames", 48000, 8, 24, 0, false, 0},
+        {"8 channels x 48 frames + 5 bytes", 48000, 8, 48, 5, false, 0},
+        {"4 channels x 48 frames", 48000, 4, 48, 0, false, 0},
+        {"8 channels x 44 frames at 44.1 kHz", 44100, 8, 44, 0, true, 0},
+        {"8 channels x 45 frames at 44.1 kHz", 44100, 8, 45, 0, true, 0},
+        {"8 channels x 46 frames at 44.1 kHz", 44100, 8, 46, 0, false, 0},
+    };
+    constexpr int kPackets = 50;
+    uint16_t port = 55200;
+    for (const auto& c : cases) {
+        const std::string group = "239.69.99." + std::to_string(port - 55200 + 160);
+        RxHarness harness;
+        SDPSession sdp = makeRxSDP(group.c_str(), port, 8);
+        sdp.sampleRate = c.sampleRate;
+        RTPReceiver receiver(sdp, makeMapping(8, 0), harness.context());
+        CHECK(receiver.start(), c.what << ": receiver should start");
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        LoopbackSender sender(group.c_str(), port);
+        for (int i = 0; i < kPackets; ++i) {
+            sender.sendL24(static_cast<uint16_t>(i), static_cast<uint32_t>(i * c.frames), c.sentChannels, 0.25f,
+                           0x12345678, c.frames, c.extraBytes);
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto stats = receiver.getStatistics();
+        receiver.stop();
+        if (c.accepted) {
+            CHECK(stats.packetsReceived == kPackets && stats.malformedPackets == 0,
+                  c.what << ": should be accepted (received " << stats.packetsReceived << ", dropped "
+                         << stats.malformedPackets << ")");
+        } else {
+            CHECK(stats.packetsReceived == c.firstAccepted && stats.malformedPackets == kPackets - c.firstAccepted,
+                  c.what << ": should be dropped (received " << stats.packetsReceived << ", dropped "
+                         << stats.malformedPackets << ")");
+        }
+        ++port;
+    }
+}
+
 void testReceiverFollowsSenderRestart() {
     std::cout << "RX follows a sender restart" << std::endl;
 
@@ -1922,6 +1983,7 @@ int main() {
     testSavedMappingCoversTheWholeStream();
     testChannelMapIsIgnored();
     testTxStreamSurvivesReload();
+    testPacketsMustMatchTheStream();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();
     testLatePacketIsIgnored();
