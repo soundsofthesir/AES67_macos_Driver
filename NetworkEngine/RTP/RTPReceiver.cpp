@@ -115,8 +115,11 @@ bool RTPReceiver::start() {
                static_cast<long long>(linkOffset), capacity, sdp_.sessionName.c_str());
 
     running_ = true;
-    receiveThread_ = std::thread([this]() {
-        if (!AudioThreadPriority::configureForRealTime()) {
+    // Wakes per packet, and at least every 1 ms (the select timeout)
+    const auto wakePeriod = std::min<std::chrono::nanoseconds>(
+        std::chrono::nanoseconds(std::llround(sdp_.ptime * 1e6)), std::chrono::milliseconds(1));
+    receiveThread_ = std::thread([this, wakePeriod]() {
+        if (!AudioThreadPriority::configureForRealTime(wakePeriod)) {
             AES67_LOGF("RTPReceiver: failed to set RT priority on receive thread (stream=%s)",
                        sdp_.sessionName.c_str());
         }

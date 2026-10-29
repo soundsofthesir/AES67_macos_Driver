@@ -118,8 +118,12 @@ bool RTPTransmitter::start() {
     published_ = true;
 
     running_ = true;
-    transmitThread_ = std::thread([this]() {
-        if (!AudioThreadPriority::configureForRealTime()) {
+    // Wakes per packet, and at least every 1 ms (see transmitLoop)
+    const auto wakePeriod = std::min<std::chrono::nanoseconds>(
+        std::chrono::nanoseconds(static_cast<int64_t>(framesPerPacket_) * 1000000000 / sdp_.sampleRate),
+        std::chrono::milliseconds(1));
+    transmitThread_ = std::thread([this, wakePeriod]() {
+        if (!AudioThreadPriority::configureForRealTime(wakePeriod)) {
             AES67_LOGF("RTPTransmitter: failed to set RT priority on transmit thread (stream=%s)",
                        sdp_.sessionName.c_str());
         }

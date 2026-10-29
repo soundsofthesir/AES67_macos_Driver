@@ -331,12 +331,16 @@ void testRoutingReclamationUnderLoad() {
         }
     });
 
-    // A fixed amount of work (with a generous time cap), so a loaded machine
-    // slows the test down rather than failing it
+    // A fixed amount of work on both threads (with a generous time cap), so a
+    // loaded machine slows the test down rather than failing it: the cycles
+    // start once the reader runs, and go on until it has read enough
     const std::vector<float> ones(64 * 2, 1.0f);
     size_t cycles = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (cycles < 500 && std::chrono::steady_clock::now() < deadline) {
+    while (reads.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    while ((cycles < 500 || reads.load() <= 1000) && std::chrono::steady_clock::now() < deadline) {
         auto buffer = std::make_unique<TimestampedAudioBuffer>(2, 256);
         buffer->write(0, 64, ones.data(), 2, 0);
         routing.publish(buffer.get(), static_cast<uint32_t>(cycles % 100));
