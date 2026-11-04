@@ -149,7 +149,9 @@ target_compile_features(BenchmarkIOHandler PRIVATE cxx_std_17)
 
 # Link libASPL for benchmark
 if(ASPL_LIBRARY)
-    target_link_libraries(BenchmarkIOHandler PRIVATE ${ASPL_LIBRARY})
+    # libASPL calls CoreFoundation; an optimized build drops those objects,
+    # a Debug or sanitizer build doesn't
+    target_link_libraries(BenchmarkIOHandler PRIVATE ${ASPL_LIBRARY} "-framework CoreFoundation")
 endif()
 
 # Integration Test: Full Audio Path
