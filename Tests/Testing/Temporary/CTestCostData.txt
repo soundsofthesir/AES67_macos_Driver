@@ -1,8 +1,0 @@
-SDPParser 2 0.00162706
-ChannelMapper 2 0.00122838
-RingBuffer 0 0
-RTPReceiver 2 0.00144285
-RTPTransmitter 2 0.00174267
-PTPClock 1 0.237661
----
-RingBuffer
