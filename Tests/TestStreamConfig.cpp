@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <clocale>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
