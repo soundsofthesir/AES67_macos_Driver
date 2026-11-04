@@ -15,6 +15,9 @@ constexpr size_t kAnnounceLength = 64;
 constexpr size_t kDelayRespLength = kHeaderLength + kTimestampLength + kPortIdentityLength;  // 54
 constexpr size_t kEventLength = kHeaderLength + kTimestampLength;                            // 44
 constexpr uint32_t kNanosecondsPerSecond = 1000000000;
+// Largest seconds value we accept (about the year 2514). Timestamp::totalNanoseconds()
+// overflows uint64 once seconds passes about 1.8e10, and the wire field is 48 bits.
+constexpr uint64_t kMaxTimestampSeconds = 1ULL << 34;
 
 // controlField values (version 1 compatibility; still sent by version 2 devices)
 constexpr uint8_t kControlSync = 0x00;
@@ -161,7 +164,7 @@ std::optional<Message> parse(const uint8_t* data, size_t length) {
         default:
             break;  // header only
     }
-    if (m.timestamp.nanoseconds >= kNanosecondsPerSecond) {
+    if (m.timestamp.nanoseconds >= kNanosecondsPerSecond || m.timestamp.seconds > kMaxTimestampSeconds) {
         return std::nullopt;
     }
     return m;
