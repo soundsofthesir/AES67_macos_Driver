@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.name }})
+    # macOS 14: Sequoia's Local Network privacy blocks the multicast tests for
+    # binaries that can't be granted the permission on a CI runner
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The configuration the README tells people to build: universal, Release
+          - name: release
+            cmake_args: -DCMAKE_BUILD_TYPE=Release
+          # ASan + UBSan over the whole suite, arm64 only to keep it quick
+          - name: sanitizers
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE=ON -DCMAKE_OSX_ARCHITECTURES=arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libASPL
+        run: |
+          brew tap gavv/gavv
+          brew install libaspl
+
+      - name: Configure
+        run: cmake -S . -B build ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      # Serial: several tests share multicast groups and ports (#132)
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure --timeout 600
+
+  linux-portable:
+    # The tests that don't need Core Audio or macOS socket options, under
+    # ASan + UBSan with a second standard library and compiler
+    name: Linux portable tests (${{ matrix.cxx }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: Tests/Linux/run-portable-tests.sh build-linux
