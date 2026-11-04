@@ -90,7 +90,8 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
                 for (const auto& s : confirmed) addSample(s);
             } else if (state_ != State::Holdover) {
                 // A rejected Sync says nothing good about the line: holdover
-                // ends on an accepted Sync or a confirmed step, not here
+                // ends on an accepted Sync, a confirmed step or the holdover
+                // time limit, not here
                 judgeLock();
             }
             return;
