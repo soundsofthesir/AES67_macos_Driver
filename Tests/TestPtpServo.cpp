@@ -270,6 +270,29 @@ void testHoldover() {
     CHECK(std::fabs(back.phaseErrorNs) < 20000, "within 20 us again (" << back.phaseErrorNs << " ns)");
 }
 
+// #109: a master that returns on a new epoch must not report Locked while
+// its first Syncs are only step candidates
+void testHoldoverStepIsNotLocked() {
+    std::cout << "A new epoch after holdover stays in holdover until the step is confirmed" << std::endl;
+    Simulation sim(Master{}, Network{}, 4.0, 7);
+    sim.runUntil(120);
+    const uint32_t generation = sim.measure().generation;
+    CHECK(sim.measure().state == Servo::State::Locked, "locked before the master goes");
+    sim.servo.holdover(sim.nowNs());
+    sim.master().stepNs = 1000000000;  // the master reboots 1 s off
+    const size_t confirm = Servo::Config{}.stepConfirmSamples;
+    for (size_t i = 1; i < confirm; ++i) {
+        sim.runUntil(120.0 + 0.25 * static_cast<double>(i));  // one Sync
+        CHECK(sim.measure().state == Servo::State::Holdover,
+              "rejected Sync " << i << ": still in holdover (state " << int(sim.measure().state) << ")");
+    }
+    sim.runUntil(120.0 + 0.25 * static_cast<double>(confirm));
+    const Run stepped = sim.measure();
+    CHECK(stepped.state == Servo::State::Acquiring && stepped.generation == generation + 1,
+          "the confirmed step starts a new timeline, acquiring (state " << int(stepped.state) << ", generation "
+                                                                        << stepped.generation << ")");
+}
+
 // #53: an Announce timeout before lock must not turn an unchecked line
 // into one the device clock follows
 void testNoHoldoverBeforeLock() {
@@ -432,6 +455,7 @@ int main() {
     testStaysLockedThroughBursts();
     testGrandmasterTimeStep();
     testHoldover();
+    testHoldoverStepIsNotLocked();
     testNoHoldoverBeforeLock();
     testImplausibleRateNeverLocks();
     testSyncTimeout();
