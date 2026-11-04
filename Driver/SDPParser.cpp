@@ -116,6 +116,15 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
     SDPSession session;
     auto lines = splitLines(sdp);
 
+    // Only the first m=audio section is read. Later sections (an ST 2022-7
+    // secondary, say) and any non-audio ones would otherwise overwrite its
+    // address, port and format (#116).
+    enum class Section { Session, Audio, Ignored };
+    Section section = Section::Session;
+    bool seenAudio = false;
+    // The session defaults are not a format: the rtpmap must be given
+    bool seenRtpmap = false;
+
     for (const auto& line : lines) {
         if (line.empty() || line[0] == '#') {
             continue;  // Skip empty lines and comments
@@ -146,7 +155,8 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
                 session.sessionInfo = trim(value);
                 break;
 
-            case 'c':  // Connection
+            case 'c':  // Connection (session-level, or the audio section's own)
+                if (section == Section::Ignored) break;
                 if (!parseConnectionLine(value, session)) {
                     return std::nullopt;
                 }
@@ -158,13 +168,33 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
                 }
                 break;
 
-            case 'm':  // Media
+            case 'm': {  // Media
+                const auto media = splitString(value, ' ');
+                if (seenAudio || media.empty() || media[0] != "audio") {
+                    section = Section::Ignored;
+                    break;
+                }
                 if (!parseMediaLine(value, session)) {
                     return std::nullopt;
                 }
+                section = Section::Audio;
+                seenAudio = true;
                 break;
+            }
 
             case 'a':  // Attribute
+                if (section == Section::Ignored) break;
+                if (startsWith(value, "rtpmap:")) {
+                    // rtpmap is a media attribute; one before any m= has no
+                    // payload type to describe
+                    if (section != Section::Audio) break;
+                    bool forPayloadType = false;
+                    if (!parseRTPMapAttribute(value.substr(7), session, forPayloadType)) {
+                        return std::nullopt;
+                    }
+                    seenRtpmap = seenRtpmap || forPayloadType;
+                    break;
+                }
                 if (!parseAttributeLine(value, session)) {
                     return std::nullopt;
                 }
@@ -174,6 +204,12 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
                 // Unknown line type, ignore
                 break;
         }
+    }
+
+    // Checked here rather than in isValid(): sessions read from streams.json
+    // have no m= or rtpmap line to have seen
+    if (!seenAudio || !seenRtpmap) {
+        return std::nullopt;
     }
 
     // Validate parsed session
@@ -297,9 +333,8 @@ bool SDPParser::parseAttributeLine(const std::string& line, SDPSession& session)
     }
 
     // Parse specific attributes
-    if (attribute == "rtpmap") {
-        return parseRTPMapAttribute(value, session);
-    } else if (attribute == "ptime") {
+    // rtpmap is handled in parseString(), which knows the media section
+    if (attribute == "ptime") {
         return parsePTimeAttribute(value, session);
     } else if (attribute == "framecount") {
         return parseFrameCountAttribute(value, session);
@@ -320,12 +355,23 @@ bool SDPParser::parseAttributeLine(const std::string& line, SDPSession& session)
     }
 }
 
-bool SDPParser::parseRTPMapAttribute(const std::string& value, SDPSession& session) {
+bool SDPParser::parseRTPMapAttribute(const std::string& value, SDPSession& session, bool& forPayloadType) {
     // Format: <payload type> <encoding name>/<clock rate>/<encoding params>
     // Example: 96 L24/48000/2
     auto parts = splitString(value, ' ');
     if (parts.size() < 2) {
         return false;
+    }
+
+    // An rtpmap for another of the m= line's payload types is not what the
+    // stream carries, so it must not set the format (#116)
+    const auto payloadType = decimal(parts[0], 127);
+    if (!payloadType) {
+        return false;
+    }
+    forPayloadType = *payloadType == session.payloadType;
+    if (!forPayloadType) {
+        return true;
     }
 
     auto formatParts = splitString(parts[1], '/');
@@ -750,6 +796,11 @@ std::vector<std::string> SDPParser::splitString(const std::string& str, char del
     std::string part;
 
     while (std::getline(stream, part, delimiter)) {
+        // A run of spaces is one separator (some senders write two). Other
+        // delimiters keep empty fields, so "L24//2" is still an error.
+        if (delimiter == ' ' && part.empty()) {
+            continue;
+        }
         parts.push_back(trim(part));
     }
 

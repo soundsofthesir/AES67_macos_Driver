@@ -155,7 +155,8 @@ private:
     static bool parseAttributeLine(const std::string& line, SDPSession& session);
 
     // Attribute parsers (a=)
-    static bool parseRTPMapAttribute(const std::string& value, SDPSession& session);
+    // forPayloadType: whether the rtpmap is for the m= line's payload type
+    static bool parseRTPMapAttribute(const std::string& value, SDPSession& session, bool& forPayloadType);
     static bool parsePTimeAttribute(const std::string& value, SDPSession& session);
     static bool parseFrameCountAttribute(const std::string& value, SDPSession& session);
     static bool parseSourceFilterAttribute(const std::string& value, SDPSession& session);
