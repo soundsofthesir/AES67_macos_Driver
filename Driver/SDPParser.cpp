@@ -124,8 +124,16 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
     bool seenAudio = false;
     // The session defaults are not a format: the rtpmap must be given
     bool seenRtpmap = false;
+    // RFC 4566 requires o=. Without it the origin address stays empty, and
+    // the SDP generated from the session (for SAP) would not parse back.
+    bool seenOrigin = false;
 
     for (const auto& line : lines) {
+        // RFC 4566 text never holds NUL or a bare CR. Rejecting them here
+        // also keeps them out of every field generate() writes back (#118).
+        if (line.find_first_of(std::string("\0\r", 2)) != std::string::npos) {
+            return std::nullopt;
+        }
         if (line.empty() || line[0] == '#') {
             continue;  // Skip empty lines and comments
         }
@@ -145,6 +153,7 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
                 if (!parseOriginLine(value, session)) {
                     return std::nullopt;
                 }
+                seenOrigin = true;
                 break;
 
             case 's':  // Session name
@@ -207,8 +216,8 @@ std::optional<SDPSession> SDPParser::parseString(const std::string& sdp) {
     }
 
     // Checked here rather than in isValid(): sessions read from streams.json
-    // have no m= or rtpmap line to have seen
-    if (!seenAudio || !seenRtpmap) {
+    // have no o=, m= or rtpmap line to have seen
+    if (!seenOrigin || !seenAudio || !seenRtpmap) {
         return std::nullopt;
     }
 

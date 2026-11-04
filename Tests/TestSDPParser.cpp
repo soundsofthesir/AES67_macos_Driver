@@ -540,6 +540,51 @@ void testMediaAndRtpmapRequired() {
     std::cout << "PASSED\n";
 }
 
+void testOriginRequired() {
+    std::cout << "Test: o= is required, so a generated SDP parses back... ";
+
+    const std::string body = "s=No origin\n"
+                             "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 96\n"
+                             "a=rtpmap:96 L24/48000/2\n";
+
+    // Found by Tests/Fuzz/FuzzSdpParser: without o= the session has no origin
+    // address, and generate() wrote "o=- <id> 0 IN IP4 " that does not parse
+    assert(!SDPParser::parseString("v=0\n" + body).has_value());
+
+    auto withOrigin = SDPParser::parseString("v=0\no=- 7 1 IN IP4 10.0.0.5\n" + body);
+    assert(withOrigin.has_value());
+    assert(SDPParser::parseString(SDPParser::generate(*withOrigin)).has_value());
+
+    std::cout << "PASSED\n";
+}
+
+void testControlCharactersRejected() {
+    std::cout << "Test: NUL and bare CR inside a line are rejected... ";
+
+    const std::string head = "v=0\n"
+                             "o=- 1 1 IN IP4 10.0.0.5\n";
+    const std::string tail = "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 96\n"
+                             "a=rtpmap:96 L24/48000/2\n";
+
+    // Found by Tests/Fuzz/FuzzSdpParser: a CR or NUL in a field was written
+    // back by generate(), so the SDP announced over SAP did not parse
+    assert(!SDPParser::parseString(head + "s=Bad\rname\n" + tail).has_value());
+    const char nulName[] = "s=Bad\0name\n";
+    assert(!SDPParser::parseString(head + std::string(nulName, sizeof(nulName) - 1) + tail).has_value());
+    assert(!SDPParser::parseString(head + "s=Fine\n" + tail + "a=x-vendor:a\rc=IN IP4 239.1.1.1\n").has_value());
+
+    // CRLF line endings are still fine
+    assert(SDPParser::parseString("v=0\r\no=- 1 1 IN IP4 10.0.0.5\r\ns=Fine\r\nc=IN IP4 239.69.1.1/32\r\n"
+                                  "t=0 0\r\nm=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n")
+               .has_value());
+
+    std::cout << "PASSED\n";
+}
+
 // ST 2022-7 senders describe the same stream twice, on two networks. We
 // receive the first section; the second's c= and port must not replace it.
 void testOnlyFirstAudioSection() {
@@ -644,6 +689,8 @@ void runAllTests() {
     testPacketTimingValidation();
     testNumericRanges();
     testMediaAndRtpmapRequired();
+    testOriginRequired();
+    testControlCharactersRejected();
     testOnlyFirstAudioSection();
     testRepeatedSpaces();
     testInvalidSDP();
