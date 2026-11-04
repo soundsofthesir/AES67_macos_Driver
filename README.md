@@ -46,7 +46,12 @@ Next up is trying PTP and sending on a real network with Dante, RAVENNA and othe
 
 ```bash
 brew install cmake
-brew tap gavv/gavv && brew install libaspl
+
+# libASPL isn't in Homebrew: build it universal and install into /usr/local
+git clone --depth 1 --branch v3.1.2 https://github.com/gavv/libASPL.git
+cmake -S libASPL -B libASPL/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build libASPL/build -j
+sudo cmake --install libASPL/build
 
 git clone https://github.com/soundsofthesir/AES67_macos_Driver.git
 cd AES67_macos_Driver

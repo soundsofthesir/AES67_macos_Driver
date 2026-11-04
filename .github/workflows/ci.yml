@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ASPL_VERSION: v3.1.2
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -33,10 +36,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libASPL isn't in Homebrew. Build the pinned release universal, so the
+      # universal driver build can link it, and install into /usr/local, where
+      # CMakeLists.txt looks for it.
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@v4
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-14
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
       - name: Install libASPL
         run: |
-          brew tap gavv/gavv
-          brew install libaspl
+          sudo mkdir -p /usr/local/include /usr/local/lib
+          sudo cp -R aspl-prefix/include/aspl /usr/local/include/
+          sudo cp aspl-prefix/lib/libASPL.a /usr/local/lib/
 
       - name: Configure
         run: cmake -S . -B build ${{ matrix.cmake_args }}
