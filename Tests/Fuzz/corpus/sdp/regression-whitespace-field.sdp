@@ -1,0 +1,45 @@
+v=0
+o= 0864673200 0 IN IP4 100/8
+a=$:pitme1
+a=92.168.1,
+a=92.084.1,/100
+s=Riedel Art0 0
+a=”lockè- 0
+a=”lPTPv2 0
+a=rezcvonlyÿ
+m=audio 5004 RTP	AVP 96
+c=IN IP4 239.69.83.?71/32
+a=rtpmap:96 L24/48000/8
+a=<<<<ptime00
+a=ts-r:1
+a=f[a:48
+a=s
+c=IN IP3 239.69.83.?71/32
+a=o»rtpmap:96 L24/480ÐÏ/8
+a=p}imeS:1
+a=frame1.100
+a=ts-refcbk:pe:t0
+a=Õÿ8
+a=$:pitme1
+a=92.168.1,
+a=92.084.1,/100
+s=Riedel Art0 0
+a=”lockè- 0
+a=”lPTPv2 0
+a=rezcvonlyÿ
+m=audio 5004 RTP	AVP 96
+c=IN IP4 239.69.83.?71/32
+a=rtpmap:96 L24/48000/8
+a=<<<<ptime00
+a=ts-r:1
+a=f[a:48
+a=s
+c=IN IP4 239.69.83.?71/32
+a=o»rtpmap:ÿÿÿRiedelrecvo293 .61/32
+a=r000/8
+a
+a=ÕÿÿÿÿRiedel A
+a=”lock=rtpmap:0
+a=t:0
+-r932
+a=ra=t=0

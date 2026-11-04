@@ -577,6 +577,10 @@ void testControlCharactersRejected() {
     assert(!SDPParser::parseString(head + std::string(nulName, sizeof(nulName) - 1) + tail).has_value());
     assert(!SDPParser::parseString(head + "s=Fine\n" + tail + "a=x-vendor:a\rc=IN IP4 239.1.1.1\n").has_value());
 
+    // A field of only whitespace is no field: an o= line whose username is
+    // a form feed has five fields, not six (also found by fuzzing)
+    assert(!SDPParser::parseString("v=0\no=\f 1 1 IN IP4 10.0.0.5\ns=Fine\n" + tail).has_value());
+
     // CRLF line endings are still fine
     assert(SDPParser::parseString("v=0\r\no=- 1 1 IN IP4 10.0.0.5\r\ns=Fine\r\nc=IN IP4 239.69.1.1/32\r\n"
                                   "t=0 0\r\nm=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n")

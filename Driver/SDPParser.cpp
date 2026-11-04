@@ -805,12 +805,16 @@ std::vector<std::string> SDPParser::splitString(const std::string& str, char del
     std::string part;
 
     while (std::getline(stream, part, delimiter)) {
+        part = trim(part);
         // A run of spaces is one separator (some senders write two). Other
-        // delimiters keep empty fields, so "L24//2" is still an error.
+        // delimiters keep empty fields, so "L24//2" is still an error. Trim
+        // first: a field of only other whitespace (a tab, a form feed) is
+        // empty too, or it would come back as an empty field that
+        // generate() writes and a reparse then drops.
         if (delimiter == ' ' && part.empty()) {
             continue;
         }
-        parts.push_back(trim(part));
+        parts.push_back(part);
     }
 
     return parts;
