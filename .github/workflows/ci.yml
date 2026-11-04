@@ -96,3 +96,9 @@ jobs:
         env:
           CXX: ${{ matrix.cxx }}
         run: Tests/Linux/run-portable-tests.sh build-linux
+
+      # Every input in Tests/Fuzz/corpus, once, through the parser fuzz targets
+      # (libFuzzer needs clang). Open-ended fuzzing runs nightly in fuzz.yml.
+      - name: Replay fuzz corpus
+        if: matrix.cxx == 'clang++'
+        run: Tests/Fuzz/run-fuzzers.sh 0 build-fuzz

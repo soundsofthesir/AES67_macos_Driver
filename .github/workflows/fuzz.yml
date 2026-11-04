@@ -1,0 +1,41 @@
+name: Fuzz
+
+# Open-ended fuzzing of the parsers that read untrusted input: PTP, SAP, SDP,
+# streams.json, ptp.json and the JSON parser under them. PRs only replay the
+# committed corpus (ci.yml); this explores new inputs, so a failure here is a
+# newly found bug rather than something the triggering commit did.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per fuzz target
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libuuid headers
+        run: sudo apt-get update && sudo apt-get install -y uuid-dev
+
+      - name: Fuzz
+        run: Tests/Fuzz/run-fuzzers.sh "${{ github.event.inputs.seconds || '300' }}" build-fuzz
+
+      # A crashing input reproduces with build-fuzz/<Target> <file>. Once it is
+      # fixed, commit the input to Tests/Fuzz/corpus/<target>/.
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: build-fuzz/crashes/
+          if-no-files-found: ignore
