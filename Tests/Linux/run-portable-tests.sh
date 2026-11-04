@@ -7,6 +7,8 @@
 # The source lists mirror the targets in Tests/CMakeLists.txt. Add a test here
 # when it builds without Apple headers beyond the stand-ins in shim/.
 #
+# Needs the libuuid headers (Debian/Ubuntu: uuid-dev) for Shared/Types.h.
+#
 # Usage: Tests/Linux/run-portable-tests.sh [build-dir]   (CXX picks the compiler)
 
 set -euo pipefail
