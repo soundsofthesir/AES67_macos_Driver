@@ -26,6 +26,7 @@
 #include "../NetworkEngine/NetworkMonitor.h"
 #include "../Driver/AES67Device.h"
 #include "../Driver/AES67IOHandler.h"
+#include "../Driver/HalExceptionGuard.h"
 #include "../NetworkEngine/StreamManager.h"
 #include "../NetworkEngine/RTP/RTPReceiver.h"
 #include "../Driver/AudioThreadPriority.h"
@@ -56,6 +57,7 @@
 #include <optional>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -1836,6 +1838,51 @@ void testOutageKeepsTimeline() {
 
 
 // ---------------------------------------------------------------------------
+// #147: C++ exceptions must not cross the AudioServerPlugIn C ABI. The guard
+// converts them into an OSStatus; libASPL's bridge has no catch, so an
+// escaping exception would terminate coreaudiod.
+// ---------------------------------------------------------------------------
+void testHalCallbackGuard() {
+    std::cout << "#147: HAL callbacks convert exceptions into errors" << std::endl;
+
+    CHECK(RunHalCallback("ok", [] { return OSStatus(kAudioHardwareNoError); }) == kAudioHardwareNoError,
+          "a normal callback result should pass through");
+    CHECK(RunHalCallback("std", []() -> OSStatus {
+              throw std::runtime_error("boom");
+          }) == kAudioHardwareUnspecifiedError,
+          "a std::exception should become an error");
+    CHECK(RunHalCallback("other", []() -> OSStatus {
+              throw 7;
+          }) == kAudioHardwareUnspecifiedError,
+          "a non-standard exception should become an error");
+}
+
+// A failed start must not leave the receiver half-started: the next attempt
+// has to work once resources are available.
+void testReceiverStartFailureRollsBack() {
+    std::cout << "#147: a failed receiver start can be retried" << std::endl;
+
+    RxHarness harness;
+    std::vector<std::unique_ptr<TimestampedAudioBuffer>> fillers;
+    bool filled = true;
+    for (size_t i = 0; i < RxRouting::kMaxRoutes; ++i) {
+        auto filler = std::make_unique<TimestampedAudioBuffer>(1, 2);
+        filled = harness.routing.publish(filler.get(), 0) && filled;
+        fillers.push_back(std::move(filler));
+    }
+    CHECK(filled, "all filler routes should publish");
+
+    RTPReceiver receiver(makeRxSDP("239.69.99.204", 55308, 2), makeMapping(2, 0), harness.context());
+    CHECK(!receiver.start(), "start should fail when the route table is full");
+    CHECK(!receiver.isRunning(), "a failed start must not report running");
+
+    harness.routing.unpublish(fillers.back().get());
+    fillers.pop_back();
+    CHECK(receiver.start(), "a second start should succeed after the route is freed");
+    receiver.stop();
+}
+
+// ---------------------------------------------------------------------------
 // kAudioStreamPropertyIsActive belongs to the HAL: it activates the streams
 // its clients use. The device must not change it on IO start/stop, because
 // libASPL's Stream::SetIsActive() sends a property-change notification, and
@@ -2021,6 +2068,8 @@ int main() {
     testDeviceSampleRate();
     testDeviceClockFromMediaClock();
     testRealTimePriorityReportsSuccess();
+    testHalCallbackGuard();
+    testReceiverStartFailureRollsBack();
     testIOStartStopLeavesStreamActivityToHAL();
     testDeviceClockFollowsReceivedStream();
     testPtpIsOffByDefault();

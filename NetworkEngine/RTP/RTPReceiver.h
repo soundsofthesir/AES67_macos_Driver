@@ -91,6 +91,13 @@ public:
 private:
     static constexpr size_t kMaxFramesPerPacket = AES67::kMaxFramesPerPacket;
 
+    /// Allocate the playout buffer, publish the route and start the thread.
+    /// May throw (allocation/thread creation); start() rolls back on failure.
+    bool startStreaming();
+
+    /// Undo a failed start: stop the thread if one exists, unpublish, close.
+    void cleanupFailedStart() noexcept;
+
     void receiveLoop();
     void processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHostTime);
     bool validatePacket(const RTP::RTPPacket& packet);

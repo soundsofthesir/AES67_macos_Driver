@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <exception>
 #include <sys/select.h>
 
 namespace AES67 {
@@ -99,6 +100,29 @@ bool RTPReceiver::start() {
         return false;
     }
 
+    // Everything below allocates or creates a thread. A throw here must not
+    // leave the socket open, a route published, or running_ true (#147).
+    try {
+        if (startStreaming()) {
+            return true;
+        }
+    } catch (const std::exception& e) {
+        try {
+            AES67_LOGF("RTPReceiver::start: %s failed: %s", sdp_.sessionName.c_str(), e.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            AES67_LOGF("RTPReceiver::start: %s failed with an unknown exception",
+                       sdp_.sessionName.c_str());
+        } catch (...) {
+        }
+    }
+    cleanupFailedStart();
+    return false;
+}
+
+bool RTPReceiver::startStreaming() {
     // Playout buffer: room for the playable window (two link offsets ahead of
     // the read point) plus packets in flight, with margin
     const int64_t linkOffset = context_.linkOffsetFrames.load(std::memory_order_relaxed);
@@ -121,7 +145,6 @@ bool RTPReceiver::start() {
     if (!context_.routing.publish(buffer_.get(), static_cast<uint32_t>(mapping_.deviceChannelStart))) {
         AES67_LOGF("RTPReceiver::start: cannot route %u channels at device channel %zu (stream=%s)",
                    sdp_.numChannels, mapping_.deviceChannelStart, sdp_.sessionName.c_str());
-        rtpSocket_.close();
         return false;
     }
 
@@ -143,6 +166,23 @@ bool RTPReceiver::start() {
     });
 
     return true;
+}
+
+void RTPReceiver::cleanupFailedStart() noexcept {
+    running_ = false;
+    try {
+        if (receiveThread_.joinable()) {
+            receiveThread_.join();
+        }
+    } catch (...) {
+    }
+    if (buffer_) {
+        context_.routing.unpublish(buffer_.get());
+    }
+    rtpSocket_.close();
+    buffer_.reset();
+    placement_.reset();
+    connected_ = false;
 }
 
 void RTPReceiver::stop() {
