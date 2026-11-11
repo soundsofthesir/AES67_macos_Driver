@@ -100,10 +100,16 @@ bool RTPReceiver::start() {
     }
 
     // Playout buffer: room for the playable window (two link offsets ahead of
-    // the read point) plus packets in flight, with margin
+    // the read point) plus packets in flight, with margin. The IO thread can
+    // read a whole Core Audio buffer that starts up to one IO period before
+    // now, so the ring must also span that buffer plus the link offset; a
+    // 4096-frame client otherwise ran past the oldest slot (#137). Use the
+    // same 16k-floor as TX, which already sizes for the largest IO buffer.
+    constexpr size_t kMinBufferFrames = 16384;
     const int64_t linkOffset = context_.linkOffsetFrames.load(std::memory_order_relaxed);
     const size_t packetFrames = sdp_.framecount > 0 ? sdp_.framecount : kMaxFramesPerPacket;
-    const size_t capacity = nextPowerOfTwo(std::max<size_t>(4096, 4 * static_cast<size_t>(linkOffset) + 4 * packetFrames));
+    const size_t capacity = nextPowerOfTwo(
+        std::max<size_t>(kMinBufferFrames, 4 * static_cast<size_t>(linkOffset) + 4 * packetFrames));
     buffer_ = std::make_unique<TimestampedAudioBuffer>(sdp_.numChannels, capacity);
 
     RtpPlacement::Config placementConfig;
