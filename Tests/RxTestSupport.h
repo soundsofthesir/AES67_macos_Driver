@@ -167,6 +167,11 @@ public:
         sendto(fd_, pkt.data(), pkt.size(), 0, reinterpret_cast<sockaddr*>(&dest_), sizeof(dest_));
     }
 
+    /// Copy of an arbitrary datagram, for malformed-packet regressions.
+    void sendRaw(const uint8_t* data, size_t size) {
+        sendto(fd_, data, size, 0, reinterpret_cast<sockaddr*>(&dest_), sizeof(dest_));
+    }
+
 private:
     int fd_{-1};
     sockaddr_in dest_{};

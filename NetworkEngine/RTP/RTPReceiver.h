@@ -95,6 +95,9 @@ private:
     void processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHostTime);
     bool validatePacket(const RTP::RTPPacket& packet);
 
+    /// Count and (rate-limited) log a packet this stream cannot use.
+    void rejectMalformed(const RTP::RTPPacket& packet, const char* reason);
+
     /// Decode into decodeBuffer_ (interleaved floats); returns frames, 0 if rejected.
     size_t decode(const uint8_t* payload, size_t payloadSize);
 
