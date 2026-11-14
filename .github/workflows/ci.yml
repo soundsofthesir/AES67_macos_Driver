@@ -80,7 +80,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: >
           sudo --preserve-env=AES67_TEST_RELAXED_TIMING,ASAN_OPTIONS,UBSAN_OPTIONS,HOME
-          "$(command -v ctest)" --test-dir build --verbose --timeout 600
+          "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
 
   linux-portable:
     # The tests that don't need Core Audio or macOS socket options, under
