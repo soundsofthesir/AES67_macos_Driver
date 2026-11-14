@@ -185,11 +185,30 @@ void testMediaClockConcurrentReads() {
     CHECK(torn.load() == 0, "no reader should see a torn snapshot (got " << torn.load() << ")");
 }
 
+// CPU time a thread has used so far. It stands still while the thread is not
+// running, which a wall clock cannot tell from a thread that is kept waiting.
+std::chrono::microseconds cpuTimeUsed(thread_act_t thread) {
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(thread, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count) != KERN_SUCCESS) {
+        throw std::runtime_error("thread_info failed");
+    }
+    return std::chrono::seconds(info.user_time.seconds + info.system_time.seconds) +
+           std::chrono::microseconds(info.user_time.microseconds + info.system_time.microseconds);
+}
+
 // The IO thread reads the clock; its writers (PTP, stream clock recovery, the
 // HAL's control thread) are not real-time. A writer stopped part-way through a
 // publish used to keep every reader spinning until it ran again (#61): a
 // reader must return at once, with a consistent snapshot, whenever the writer
 // stops. The writer is stopped at arbitrary points with thread_suspend.
+//
+// A read counts as waiting by the CPU time the reader spends inside snapshot()
+// while the writer stays stopped, not by wall time: on a shared CI machine a
+// thread can go unscheduled for 15 ms or more, and a reader that was not run
+// has not been kept waiting by the latch. With the writer stopped a working
+// latch returns in one pass, and a latch that waits for the writer never
+// returns, so the budget only sets how long a failure takes to show.
 void testSnapshotWithAStalledWriter() {
     std::cout << "#61: MediaClock reads never wait for a stalled writer" << std::endl;
 
@@ -206,6 +225,7 @@ void testSnapshotWithAStalledWriter() {
     // Reads on request on their own thread, so a reader stuck behind the
     // writer is seen as a timeout rather than hanging the test
     std::atomic<int> requests{0};
+    std::atomic<int> started{0};
     std::atomic<int> done{0};
     std::atomic<int> torn{0};
     std::atomic<int> stale{0};
@@ -218,6 +238,7 @@ void testSnapshotWithAStalledWriter() {
                 std::this_thread::yield();
                 continue;
             }
+            started.store(served + 1);
             const auto s = clock.snapshot();
             if (s.anchorSample != static_cast<int64_t>(3 * s.anchorHost) ||
                 s.samplesPerTick != 2.0 * static_cast<double>(s.anchorHost)) {
@@ -232,28 +253,53 @@ void testSnapshotWithAStalledWriter() {
         }
     });
 
+    const thread_act_t readerThread = pthread_mach_thread_np(reader.native_handle());
+
+    // Far more CPU time than one pass of snapshot() needs, sanitizers included
+    constexpr std::chrono::milliseconds kCpuBudget{200};
+    // For a reader that gets no CPU time at all: one blocked rather than
+    // spinning, or one the machine never ran
+    constexpr std::chrono::seconds kWallLimit{30};
+    // Nearly every read is answered within microseconds; look closer after this
+    constexpr std::chrono::milliseconds kQuickAnswer{1};
+
     std::mt19937 random(61);
     std::uniform_int_distribution<int> gapMicroseconds(0, 50);
     int waited = 0;
+    int stalls = 0;
     constexpr int kStalls = 2000;
-    for (int i = 0; i < kStalls; ++i) {
+    // One read kept waiting proves the fault, and each one costs the whole budget
+    while (stalls < kStalls && waited == 0) {
+        const int request = ++stalls;
         std::this_thread::sleep_for(std::chrono::microseconds(gapMicroseconds(random)));
         thread_suspend(writerThread);
-        requests.store(i + 1);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-        while (done.load() != i + 1 && std::chrono::steady_clock::now() < deadline) {
+        requests.store(request);
+        const auto asked = std::chrono::steady_clock::now();
+        bool inSnapshot = false;
+        std::chrono::microseconds cpuAtEntry{0};
+        while (done.load() != request) {
             std::this_thread::yield();
+            const auto elapsed = std::chrono::steady_clock::now() - asked;
+            if (elapsed < kQuickAnswer) continue;
+            if (!inSnapshot && started.load() == request) {
+                inSnapshot = true;
+                cpuAtEntry = cpuTimeUsed(readerThread);
+            }
+            const bool budgetSpent = inSnapshot && cpuTimeUsed(readerThread) - cpuAtEntry >= kCpuBudget;
+            if (budgetSpent || elapsed >= kWallLimit) {
+                ++waited;
+                break;
+            }
         }
-        if (done.load() != i + 1) ++waited;
         thread_resume(writerThread);
-        while (done.load() != i + 1) std::this_thread::yield();
+        while (done.load() != request) std::this_thread::yield();
     }
     writing = false;
     reading = false;
     writer.join();
     reader.join();
 
-    CHECK(waited == 0, "no read should wait for the stopped writer (" << waited << " of " << kStalls << " did)");
+    CHECK(waited == 0, "no read should wait for the stopped writer (read " << stalls << " of " << kStalls << " did)");
     CHECK(torn.load() == 0, "no read should be torn (got " << torn.load() << ")");
     CHECK(stale.load() == 0, "every read should be a published state, never an older one (got " << stale.load() << ")");
 }

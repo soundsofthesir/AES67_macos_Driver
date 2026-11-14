@@ -57,6 +57,8 @@ struct Timestamp {
     uint64_t seconds{0};
     uint32_t nanoseconds{0};
 
+    /// Fits in 64 bits for seconds up to about 1.8e10; parse() rejects
+    /// anything past 2^34, so only a hand-built Timestamp can overflow
     uint64_t totalNanoseconds() const { return seconds * 1000000000ULL + nanoseconds; }
     bool operator==(const Timestamp& other) const {
         return seconds == other.seconds && nanoseconds == other.nanoseconds;

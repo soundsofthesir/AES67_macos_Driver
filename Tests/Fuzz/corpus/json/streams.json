@@ -1,0 +1,81 @@
+{
+  "version": "1.0",
+  "streams": [
+    {
+      "enabled": true,
+      "description": "IFB",
+      "createdTimestamp": 1793827318,
+      "modifiedTimestamp": 1793827318,
+      "jitterBufferDepth": 0,
+      "networkInterface": "",
+      "sdp": {
+        "sessionName": "Riedel Artist IFB",
+        "sessionInfo": "Intercom Feed Back 8 Channels",
+        "sessionID": 1729346400,
+        "sessionVersion": 0,
+        "originUsername": "-",
+        "originAddress": "192.168.1.100",
+        "connectionAddress": "239.69.83.171",
+        "ttl": 32,
+        "port": 5004,
+        "payloadType": 96,
+        "encoding": "L24",
+        "sampleRate": 48000,
+        "numChannels": 8,
+        "ptime": 1,
+        "framecount": 48,
+        "sourceAddress": "192.168.1.100",
+        "ptpDomain": 0,
+        "ptpMasterMAC": "00-1B-21-AC-B5-4F",
+        "mediaClockType": "direct=0",
+        "direction": "recvonly"
+      },
+      "mapping": {
+        "streamID": "e7ff298a-89ac-488e-9048-e125bb210be6",
+        "streamName": "Riedel",
+        "streamChannelCount": 8,
+        "streamChannelOffset": 0,
+        "deviceChannelStart": 0,
+        "deviceChannelCount": 8
+      }
+    },
+    {
+      "enabled": true,
+      "description": "TX",
+      "createdTimestamp": 1793827318,
+      "modifiedTimestamp": 1793827318,
+      "jitterBufferDepth": 0,
+      "networkInterface": "",
+      "sdp": {
+        "sessionName": "Riedel Artist IFB",
+        "sessionInfo": "Intercom Feed Back 8 Channels",
+        "sessionID": 1729346400,
+        "sessionVersion": 0,
+        "originUsername": "-",
+        "originAddress": "192.168.1.100",
+        "connectionAddress": "239.69.10.20",
+        "ttl": 16,
+        "port": 5004,
+        "payloadType": 96,
+        "encoding": "L24",
+        "sampleRate": 48000,
+        "numChannels": 8,
+        "ptime": 1,
+        "framecount": 48,
+        "sourceAddress": "192.168.1.100",
+        "ptpDomain": 0,
+        "ptpMasterMAC": "00-1B-21-AC-B5-4F",
+        "mediaClockType": "direct=0",
+        "direction": "sendonly"
+      },
+      "mapping": {
+        "streamID": "1ad6349c-7681-4185-8dad-724a6bc1d2cc",
+        "streamName": "Riedel",
+        "streamChannelCount": 8,
+        "streamChannelOffset": 0,
+        "deviceChannelStart": 8,
+        "deviceChannelCount": 8
+      }
+    }
+  ]
+}

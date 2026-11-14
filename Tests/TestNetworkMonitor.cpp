@@ -9,6 +9,7 @@
 
 #include "../NetworkEngine/NetworkMonitor.h"
 #include "../NetworkEngine/NetworkInterfaceDetection.h"
+#include "TestWait.h"
 #include <atomic>
 #include <chrono>
 #include <iostream>
@@ -118,6 +119,10 @@ public:
         changes_.clear();
         return changes;
     }
+    size_t size() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return changes_.size();
+    }
 
 private:
     std::mutex mutex_;
@@ -128,7 +133,16 @@ State state(const std::string& name, unsigned index, const std::string& ipv4, bo
     return State{name, index, ipv4, running};
 }
 
+// Several 20 ms polls with nothing changing. Only used where nothing should
+// be reported: a slow machine can only make such a check pass.
 void settle() { std::this_thread::sleep_for(std::chrono::milliseconds(120)); }
+
+// Waits until the log holds count changes, then a few more polls, so a
+// duplicate report on a following poll is still caught
+void awaitChanges(ChangeLog& log, size_t count) {
+    TestWait::waitUntil([&] { return log.size() >= count; });
+    settle();
+}
 
 void testMonitorReportsChanges() {
     std::cout << "The monitor reports each change of a watched interface, once" << std::endl;
@@ -148,19 +162,21 @@ void testMonitorReportsChanges() {
     CHECK(log.take().empty(), "nothing is reported while nothing changes");
 
     network.set("en0", state("en0", 4, "10.46.75.200"));  // DHCP gave a new address
-    settle();
+    awaitChanges(log, 1);
     CHECK(log.take() == std::vector<std::string>{"en0"}, "a new address is reported, for that interface only");
 
+    // Each step waits for its report: a poll that came after both steps
+    // would see no change at all
     network.set("en0", state("en0", 4, "10.46.75.200", false));  // link down (Wi-Fi roam)
-    settle();
+    awaitChanges(log, 1);
     network.set("en0", state("en0", 4, "10.46.75.200", true));   // and back up
-    settle();
+    awaitChanges(log, 2);
     CHECK(log.take().size() == 2, "link down and link up are each reported");
 
     network.set("en0", std::nullopt);                      // adapter unplugged
-    settle();
+    awaitChanges(log, 1);
     network.set("en0", state("en0", 9, "10.46.75.200"));   // replugged with a new index
-    settle();
+    awaitChanges(log, 2);
     CHECK(log.take().size() == 2, "an interface disappearing and returning (new index) is reported");
 }
 
@@ -174,9 +190,8 @@ void testMonitorFollowsAuto() {
     config.provider = [&](const std::string& setting) { return network.get(setting); };
     NetworkMonitor monitor(config, [&](const std::string& setting) { log.add(setting); });
     monitor.watch("");
-    settle();
     network.set("", state("en0", 4, "10.46.75.146"));  // Ethernet plugged in, now primary
-    settle();
+    awaitChanges(log, 1);
     CHECK(log.take() == std::vector<std::string>{""}, "a different primary interface is reported for \"auto\"");
 }
 
@@ -201,11 +216,11 @@ void testMonitorSurvivesAThrowingHandler() {
     monitor.watch("en0");
 
     network.set("en0", state("en0", 4, "10.46.75.200"));
-    settle();
+    awaitChanges(log, 1);
     CHECK(log.take() == std::vector<std::string>{"en0"}, "the change is reported again once the handler succeeds");
 
     network.set("en0", state("en0", 4, "10.46.75.201"));
-    settle();
+    awaitChanges(log, 1);
     CHECK(log.take() == std::vector<std::string>{"en0"}, "and later changes are still reported, once");
 }
 

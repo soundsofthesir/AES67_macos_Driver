@@ -57,6 +57,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 endif()
 
+# Sanitizers, for CI and local debugging. Applies to every target, the driver
+# bundle included, so don't install a sanitized driver into coreaudiod.
+option(AES67_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(AES67_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # ============================================================================
 # Dependencies
 # ============================================================================
