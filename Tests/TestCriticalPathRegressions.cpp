@@ -1930,6 +1930,59 @@ void testOutageKeepsTimeline() {
     CHECK(countNear(region, 0.0f) == kOutagePackets * kFramesPerPacket, "the outage should be exactly its own length of silence");
 }
 
+// ---------------------------------------------------------------------------
+// #137: the IO thread reads a whole Core Audio buffer whose start can be one
+// IO period behind now. A 4096-frame read therefore spans about
+// ioBuf + 2 * linkOffset frames; the old 4096-frame ring lost its oldest
+// ~8% to overwrites and played them as silence.
+// ---------------------------------------------------------------------------
+void testLargeIoBufferReadsTheWholeCycle() {
+    std::cout << "#137: a 4096-frame IO read is served completely" << std::endl;
+
+    constexpr size_t kIoFrames = 4096;
+    constexpr uint16_t kPackets = 600;  // 600 ms, more than the read window
+
+    RxHarness harness;
+    RTPReceiver receiver(makeRxSDP("239.69.99.203", 55306, 2), makeMapping(2, 0), harness.context());
+    CHECK(receiver.start(), "receiver should start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    LoopbackSender sender("239.69.99.203", 55306);
+    AudioThreadPriority::configureForRealTime();
+    auto next = std::chrono::steady_clock::now();
+    for (uint16_t i = 0; i < kPackets; ++i) {
+        sender.sendL24(i, i * kFramesPerPacket, 2, 0.25f);
+        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+    }
+    AudioThreadPriority::restoreNormalPriority();
+
+    // Pin the end of the window now, while the stream is still the newest
+    // data. Draining (below) lets wall-clock time run past the last packet,
+    // which would move a now-relative window beyond what was sent.
+    const int64_t readEnd = harness.readPositionNow();
+
+    // Let the receive thread drain the socket before reading. Slower builds
+    // (sanitizers) must not turn this capacity test into a scheduling test.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (receiver.getStatistics().packetsReceived < kPackets &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // The oldest cycle the HAL can ask for: one IO buffer behind the read
+    // point (which is already link-offset behind the media clock).
+    const int64_t start = readEnd - static_cast<int64_t>(kIoFrames);
+    std::vector<float> out(kIoFrames * 128, -1.0f);
+    size_t valid = 0;
+    harness.routing.read([&](const RxRouting::Route& route) {
+        valid += route.buffer->read(start, kIoFrames, out.data(), 128, route.deviceChannelStart);
+    });
+    receiver.stop();
+
+    CHECK(valid == kIoFrames,
+          "a 4096-frame IO read should return every frame (got " << valid << " of " << kIoFrames << ")");
+}
 
 // ---------------------------------------------------------------------------
 // kAudioStreamPropertyIsActive belongs to the HAL: it activates the streams
@@ -2154,6 +2207,7 @@ int main() {
     testInterleavedSecondSourceIsIgnored();
     testRestartBehindPlayoutIsFollowed();
     testOutageKeepsTimeline();
+    testLargeIoBufferReadsTheWholeCycle();
 
     std::cout << "\nCritical path regressions: " << checksPassed << " passed, "
               << checksFailed << " failed" << std::endl;
