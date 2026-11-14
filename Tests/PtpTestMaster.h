@@ -6,14 +6,16 @@
 // Delay_Req by multicast or unicast. Test ports and TTL 0, so nothing
 // reaches the network.
 //
-// Two-step, its Follow_Up carries the kernel's time for the earlier of two
-// copies of the Sync on lo0 (its own and a witness socket's), as a
-// master's hardware stamps the time a Sync leaves. The kernel stamps each
-// socket's copy as it delivers it, usually within ~35 us of a receiver's
-// copy. A shared CI runner sometimes delivers one copy hundreds of us
-// late, and a t1 that late lies above the master's true line, where the
-// receiver's upper-envelope fit rests on it (+624 us, +46 ppm seen):
-// two copies make that far less likely. A time read before
+// Two-step, its Follow_Up carries the kernel's time for the first copy of
+// the Sync delivered on lo0, as a master's hardware stamps the time a Sync
+// leaves. The kernel stamps each socket's copy as it delivers it, newest
+// socket first, so the master opens a witness socket afresh before each
+// Sync: its copy comes before any receiver's. A t1 later than a receiver's
+// copy lies above the master's true line, where the receiver's
+// upper-envelope fit rests on it. A shared CI runner can stall between
+// copies for hundreds of us, which moved the estimate by +624 us and
+// +46 ppm, and +1.4 ms and +120 ppm, while t1 came from the master's own
+// socket, delivered after the receiver's. A time read before
 // sending would include the send call itself, which takes 40 to 300 us
 // depending on how fast the CPU is running, and Syncs whose fastest delay
 // moves like that defeat the servo's lock test.
@@ -79,11 +81,10 @@ public:
     explicit ScriptedMaster(Settings settings) : s_(settings) {
         identity_ = PortIdentity{ClockIdentity{{0x00, 0x1D, 0xC1, 0xFF, 0xFE, 0x00, 0x00, s_.identityByte}}, 1};
         const unsigned lo0 = if_nametoindex("lo0");
+        lo0_ = lo0;
         send_.open(Socket::Options{0, "", "", lo0, 0});
         multicastEvent_.open(Socket::Options{s_.eventPort, "", kGroup, lo0, 0});
         unicastEvent_.open(Socket::Options{s_.eventPort, "127.0.0.1", "", lo0, 0});
-        // Another copy of each Sync, stamped by the kernel as a receiver's is
-        witness_.open(Socket::Options{s_.eventPort, "", kGroup, lo0, 0});
         thread_ = std::thread([this] { run(); });
     }
     ~ScriptedMaster() { stop(); }
@@ -102,8 +103,8 @@ public:
     uint64_t unicastDelayRequests() const { return unicastRequests_.load(); }
 
     /// For a failed test: how far apart the kernel put the two copies of
-    /// each Sync. The Follow_Up carries the earlier; the gap shows how late
-    /// one copy can be delivered, which would have put t1 above the line.
+    /// each Sync. The Follow_Up carries the earlier (normally the witness's);
+    /// the gap shows how long delivery stalled between sockets.
     std::string syncReport() const {
         std::lock_guard<std::mutex> lock(recordsMutex_);
         std::vector<int64_t> sendCall, ownMinusWitness;
@@ -154,6 +155,11 @@ private:
 
     void sendSync() {
         const uint16_t seq = syncSequence_++;
+        if (s_.twoStep) {
+            // The newest socket gets the first copy
+            witness_.close();
+            witness_.open(Socket::Options{s_.eventPort, "", kGroup, lo0_, 0});
+        }
         const uint64_t preNs = hostNanos();
         const uint64_t t1 = clockAt(preNs);  // just before it leaves
         if (s_.twoStep) {
@@ -174,7 +180,8 @@ private:
     }
 
     // A copy of a Sync came back: its own (the master's event socket) or
-    // the witness's. The Follow_Up goes once both have, with the earlier time.
+    // the witness's. The Follow_Up goes once both have, with the earlier
+    // time, which is the witness's unless something went wrong.
     void onSyncCopy(const Message& m, uint64_t ticks, bool own) {
         if (ticks == 0 || m.header.type != MessageType::Sync) return;
         const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
@@ -291,6 +298,7 @@ private:
     Settings s_;
     PortIdentity identity_;
     Socket send_, multicastEvent_, unicastEvent_, witness_;
+    unsigned lo0_{0};
     mutable std::mutex recordsMutex_;
     std::deque<SyncRecord> records_;
     std::optional<PendingFollowUp> pendingFollowUp_;
