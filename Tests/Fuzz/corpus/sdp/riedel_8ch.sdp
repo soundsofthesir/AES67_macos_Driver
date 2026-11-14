@@ -1,0 +1,15 @@
+v=0
+o=- 1729346400 0 IN IP4 192.168.1.100
+s=Riedel Artist IFB
+i=Intercom Feed Back 8 Channels
+t=0 0
+a=clock-domain:PTPv2 0
+a=recvonly
+m=audio 5004 RTP/AVP 96
+c=IN IP4 239.69.83.171/32
+a=rtpmap:96 L24/48000/8
+a=ptime:1
+a=framecount:48
+a=source-filter: incl IN IP4 239.69.83.171 192.168.1.100
+a=ts-refclk:ptp=IEEE1588-2008:00-1B-21-AC-B5-4F:domain-nmbr=0
+a=mediaclk:direct=0

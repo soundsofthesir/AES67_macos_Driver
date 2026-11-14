@@ -111,28 +111,31 @@ bool NetworkUtils::setQoSTrafficClass(int sockfd, int dscpValue) {
 }
 
 bool NetworkUtils::bindToInterface(int sockfd, const std::string& interfaceName) {
-    // Use SO_BINDTODEVICE to bind socket to a specific interface
-    // This may require root privileges
-    if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, 
-                   interfaceName.c_str(), interfaceName.length()) < 0) {
-        // On macOS, SO_BINDTODEVICE is not available, so we use IP_BOUND_IF instead
 #ifdef __APPLE__
-        unsigned int if_index = if_nametoindex(interfaceName.c_str());
-        if (if_index == 0) {
-            return false;
-        }
-        
-        if (setsockopt(sockfd, IPPROTO_IP, IP_BOUND_IF, &if_index, sizeof(if_index)) < 0) {
-            perror("Failed to bind to interface");
-            return false;
-        }
-#else
+    // macOS binds by interface index. SO_BINDTODEVICE exists only in newer
+    // SDKs, and the driver still builds against older ones.
+    unsigned int if_index = if_nametoindex(interfaceName.c_str());
+    if (if_index == 0) {
+        return false;
+    }
+    if (setsockopt(sockfd, IPPROTO_IP, IP_BOUND_IF, &if_index, sizeof(if_index)) < 0) {
         perror("Failed to bind to interface");
         return false;
-#endif
     }
-    
     return true;
+#elif defined(SO_BINDTODEVICE)
+    // Linux; may require root privileges
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE,
+                   interfaceName.c_str(), interfaceName.length()) < 0) {
+        perror("Failed to bind to interface");
+        return false;
+    }
+    return true;
+#else
+    (void)sockfd;
+    (void)interfaceName;
+    return false;
+#endif
 }
 
 std::vector<std::string> NetworkUtils::getNetworkInterfaces() {
