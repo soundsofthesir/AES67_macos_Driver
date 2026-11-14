@@ -122,13 +122,42 @@ bool RTPTransmitter::start() {
     const auto wakePeriod = std::min<std::chrono::nanoseconds>(
         std::chrono::nanoseconds(static_cast<int64_t>(framesPerPacket_) * 1000000000 / sdp_.sampleRate),
         std::chrono::milliseconds(1));
-    transmitThread_ = std::thread([this, wakePeriod]() {
-        if (!AudioThreadPriority::configureForRealTime(wakePeriod)) {
-            AES67_LOGF("RTPTransmitter: failed to set RT priority on transmit thread (stream=%s)",
-                       sdp_.sessionName.c_str());
+
+    // If thread creation throws after the route is published, undo it; the
+    // next start would otherwise see running_/published_ and refuse (#147).
+    auto rollback = [this] {
+        running_ = false;
+        if (published_) {
+            context_.routing.unpublish(buffer_.get());
+            published_ = false;
         }
-        transmitLoop();
-    });
+        rtpSocket_.close();
+    };
+    try {
+        transmitThread_ = std::thread([this, wakePeriod]() {
+            if (!AudioThreadPriority::configureForRealTime(wakePeriod)) {
+                AES67_LOGF("RTPTransmitter: failed to set RT priority on transmit thread (stream=%s)",
+                           sdp_.sessionName.c_str());
+            }
+            transmitLoop();
+        });
+    } catch (const std::exception& e) {
+        rollback();
+        try {
+            AES67_LOGF("RTPTransmitter::start: thread creation failed: %s (stream=%s)",
+                       e.what(), sdp_.sessionName.c_str());
+        } catch (...) {
+        }
+        return false;
+    } catch (...) {
+        rollback();
+        try {
+            AES67_LOGF("RTPTransmitter::start: thread creation failed (stream=%s)",
+                       sdp_.sessionName.c_str());
+        } catch (...) {
+        }
+        return false;
+    }
 
     AES67_LOGF("RTPTransmitter::start: %s:%u, %u frames per packet (stream=%s)",
                sdp_.connectionAddress.c_str(), sdp_.port, framesPerPacket_, sdp_.sessionName.c_str());
