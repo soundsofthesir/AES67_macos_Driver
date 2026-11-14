@@ -155,7 +155,10 @@ void testFollowsAMaster() {
     CHECK(device.changes >= 1, "the device was told lock and domain changed");
     CHECK(device.fixedOffset == *source->status().offset && device.fixedGeneration == generation,
           "and given the offset, for its timeline");
-    if (checksFailed > failedBefore) std::cerr << describe(source->status().receiver, master) << std::endl;
+    // Always on CI, to see how close runners come to the limits
+    if (checksFailed > failedBefore || AES67::TestWait::relaxedTiming()) {
+        std::cerr << describe(source->status().receiver, master) << std::endl;
+    }
     source->stop();
     CHECK(!source->locked() && source->clockDomain() == 0, "stopped: neither locked nor in a domain");
 }

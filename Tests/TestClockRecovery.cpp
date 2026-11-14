@@ -377,7 +377,8 @@ void testLoopbackDriftingSender() {
 
     const LoopbackRun recovered = receiveDriftingSender("239.69.99.31", 55062, kPpm, 8.0, true);
     std::cout << recovered.stats.reanchors << " re-anchors, " << recovered.gaps << " silent samples, mean rate "
-              << (recovered.meanRatio - 1.0) * 1e6 << " ppm" << std::endl;
+              << (recovered.meanRatio - 1.0) * 1e6 << " ppm, " << recovered.stats.lateDrops << " late, "
+              << recovered.stats.earlyDrops << " early" << std::endl;
     CHECK(recovered.stats.reanchors == 0, "recovered: no re-anchors (got " << recovered.stats.reanchors << ")");
     // Scheduling on a loaded CI runner delays some packets past the window
     const uint64_t outsideLimit = TestWait::timingLimit<uint64_t>(2, 20);

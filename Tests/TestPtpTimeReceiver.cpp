@@ -113,7 +113,10 @@ void testFollowsATwoStepMaster() {
     CHECK(r.status.master && r.status.master->sender == master.identity(), "the master is the one announcing");
     CHECK(r.status.delayResponses > 0 && master.multicastDelayRequests() > 0 && master.unicastDelayRequests() == 0,
           "Delay_Req is sent to the multicast group");
-    if (checksFailed > failedBefore) std::cerr << describe(receiver.status(), master) << std::endl;
+    // Always on CI, to see how close runners come to the limits
+    if (checksFailed > failedBefore || AES67::TestWait::relaxedTiming()) {
+        std::cerr << describe(receiver.status(), master) << std::endl;
+    }
     receiver.stop();
 }
 
