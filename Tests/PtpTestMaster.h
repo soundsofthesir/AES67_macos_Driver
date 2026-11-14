@@ -25,9 +25,14 @@
 #include <poll.h>
 #include <atomic>
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
+#include <deque>
+#include <mutex>
 #include <net/if.h>
 #include <optional>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -73,6 +78,8 @@ public:
         send_.open(Socket::Options{0, "", "", lo0, 0});
         multicastEvent_.open(Socket::Options{s_.eventPort, "", kGroup, lo0, 0});
         unicastEvent_.open(Socket::Options{s_.eventPort, "127.0.0.1", "", lo0, 0});
+        // Another copy of each Sync, stamped by the kernel as a receiver's is
+        witness_.open(Socket::Options{s_.eventPort, "", kGroup, lo0, 0});
         thread_ = std::thread([this] { run(); });
     }
     ~ScriptedMaster() { stop(); }
@@ -90,6 +97,47 @@ public:
     uint64_t multicastDelayRequests() const { return multicastRequests_.load(); }
     uint64_t unicastDelayRequests() const { return unicastRequests_.load(); }
 
+    /// For a failed test: how each Sync's t1 compares with the kernel time
+    /// a receiver's copy got. t1 later than that puts the Sync above the
+    /// master's true line, where the servo's upper-envelope fit rests on it.
+    std::string syncReport() const {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        std::vector<int64_t> sendCall, ownMinusWitness;
+        size_t fallback = 0, noWitness = 0;
+        struct Outlier { int64_t ahead; double atSeconds; uint16_t seq; };
+        std::vector<Outlier> outliers;
+        const uint64_t start = records_.empty() ? 0 : records_.front().preNs;
+        for (const auto& r : records_) {
+            sendCall.push_back(static_cast<int64_t>(r.postNs - r.preNs));
+            if (r.ownNs == 0) ++fallback;
+            if (r.witnessNs == 0) { ++noWitness; continue; }
+            // t1 as sent, in host time: the own copy's stamp, or the time read before sending
+            const uint64_t t1Host = r.ownNs != 0 ? r.ownNs : r.preNs;
+            const int64_t ahead = static_cast<int64_t>(t1Host - r.witnessNs);
+            ownMinusWitness.push_back(ahead);
+            outliers.push_back({ahead, static_cast<double>(r.preNs - start) / 1e9, r.seq});
+        }
+        auto summary = [](std::vector<int64_t> v) {
+            std::ostringstream o;
+            if (v.empty()) return std::string("none");
+            std::sort(v.begin(), v.end());
+            o << "min " << v.front() / 1000.0 << " us, median " << v[v.size() / 2] / 1000.0 << " us, p99 "
+              << v[v.size() * 99 / 100] / 1000.0 << " us, max " << v.back() / 1000.0 << " us";
+            return o.str();
+        };
+        std::sort(outliers.begin(), outliers.end(), [](const Outlier& a, const Outlier& b) { return a.ahead > b.ahead; });
+        std::ostringstream o;
+        o << "  master: " << records_.size() << " Syncs, " << fallback << " Follow_Ups with the time read before sending, "
+          << noWitness << " with no witness copy\n"
+          << "  send call: " << summary(sendCall) << "\n"
+          << "  t1 minus a receiver copy's kernel time (positive: above the true line): " << summary(ownMinusWitness) << "\n"
+          << "  furthest above:";
+        for (size_t i = 0; i < outliers.size() && i < 8; ++i) {
+            o << " " << outliers[i].ahead / 1000.0 << " us at " << outliers[i].atSeconds << " s (seq " << outliers[i].seq << ");";
+        }
+        return o.str();
+    }
+
 private:
     static Timestamp timestampOf(uint64_t ns) { return Timestamp{ns / 1000000000ULL, static_cast<uint32_t>(ns % 1000000000ULL)}; }
 
@@ -102,7 +150,8 @@ private:
 
     void sendSync() {
         const uint16_t seq = syncSequence_++;
-        const uint64_t t1 = clockAt(hostNanos());  // just before it leaves
+        const uint64_t preNs = hostNanos();
+        const uint64_t t1 = clockAt(preNs);  // just before it leaves
         if (s_.twoStep) {
             // The Follow_Up goes when the Sync comes back on lo0, with the
             // kernel's time for it (or this one, should it not come back)
@@ -111,6 +160,8 @@ private:
         } else {
             sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, false, originOf(t1), scaledCorrection()));
         }
+        const uint64_t postNs = hostNanos();
+        note(seq, [preNs, postNs](SyncRecord& r) { r.preNs = preNs; r.postNs = postNs; });
     }
 
     void sendFollowUp(uint16_t seq, uint64_t t1) {
@@ -121,8 +172,47 @@ private:
     void onOwnSync(const Message& m, uint64_t ticks) {
         if (pendingFollowUp_ && ticks != 0 && m.header.type == MessageType::Sync &&
             m.header.sequenceId == pendingFollowUp_->sequence) {
+            const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
+            note(m.header.sequenceId, [ns](SyncRecord& r) { r.ownNs = ns; });
             sendFollowUp(pendingFollowUp_->sequence, clockAt(HostTimebase::current().ticksToNanos(ticks)));
         }
+    }
+
+    void readWitness() {
+        uint8_t buffer[256];
+        uint64_t ticks = 0;
+        uint32_t source = 0;
+        long n;
+        while ((n = witness_.receive(buffer, sizeof(buffer), ticks, source)) > 0) {
+            const auto m = parse(buffer, static_cast<size_t>(n));
+            if (m && ticks != 0 && m->header.type == MessageType::Sync && m->header.source.clock == identity_.clock) {
+                const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
+                note(m->header.sequenceId, [ns](SyncRecord& r) { r.witnessNs = ns; });
+            }
+        }
+    }
+
+    struct SyncRecord {
+        uint16_t seq{0};
+        uint64_t preNs{0};      // read before sending
+        uint64_t postNs{0};     // read after the send call returned
+        uint64_t ownNs{0};      // kernel time of the master's own copy (0: fallback t1 used)
+        uint64_t witnessNs{0};  // kernel time of another socket's copy
+    };
+
+    // Updates the record for a Sync sequence, made on first use
+    template <typename Update>
+    void note(uint16_t seq, Update update) {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        for (auto it = records_.rbegin(); it != records_.rend() && it - records_.rbegin() < 64; ++it) {
+            if (it->seq == seq) {
+                update(*it);
+                return;
+            }
+        }
+        records_.push_back(SyncRecord{});
+        records_.back().seq = seq;
+        update(records_.back());
     }
 
     void sendAnnounce() {
@@ -168,10 +258,11 @@ private:
                 if (sendingSyncs_) sendSync();
                 nextSync += syncNs;
             }
-            pollfd fds[2] = {{multicastEvent_.fd(), POLLIN, 0}, {unicastEvent_.fd(), POLLIN, 0}};
-            ::poll(fds, 2, 2);
+            pollfd fds[3] = {{multicastEvent_.fd(), POLLIN, 0}, {unicastEvent_.fd(), POLLIN, 0}, {witness_.fd(), POLLIN, 0}};
+            ::poll(fds, 3, 2);
             readEventPort(multicastEvent_, false);
             readEventPort(unicastEvent_, true);
+            readWitness();
             if (pendingFollowUp_ && hostNanos() - pendingFollowUp_->sentNs > kOwnSyncWaitNs) {
                 sendFollowUp(pendingFollowUp_->sequence, pendingFollowUp_->fallbackT1);
             }
@@ -187,7 +278,9 @@ private:
 
     Settings s_;
     PortIdentity identity_;
-    Socket send_, multicastEvent_, unicastEvent_;
+    Socket send_, multicastEvent_, unicastEvent_, witness_;
+    mutable std::mutex recordsMutex_;
+    std::deque<SyncRecord> records_;
     std::optional<PendingFollowUp> pendingFollowUp_;
     uint16_t syncSequence_{0};
     uint16_t announceSequence_{0};
@@ -208,6 +301,24 @@ inline TimeReceiver::Config receiverConfig(bool unicast = false) {
     c.ttl = 0;
     c.identity = ClockIdentity{{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0xDD, 0xEE, 0xFF}};
     return c;
+}
+
+// For a failed test: what the receiver saw, against the master's true clock
+inline std::string describe(const TimeReceiver::Status& status, const ScriptedMaster& master) {
+    static const char* const kStates[] = {"Acquiring", "Locked", "Holdover"};
+    std::ostringstream o;
+    o << "  receiver: " << kStates[static_cast<int>(status.state)] << ", generation " << status.generation << ", "
+      << status.syncs << " Syncs, " << status.followUps << " Follow_Ups, " << status.delayRequests << " Delay_Req, "
+      << status.delayResponses << " Delay_Resp, " << status.announces << " Announces, path delay "
+      << status.pathDelayNs / 1000 << " us";
+    if (status.estimate) {
+        const uint64_t now = hostNanos();
+        o << ", rate " << (status.estimate->rate - 1.0) * 1e6 << " ppm, phase "
+          << static_cast<int64_t>(status.estimate->masterAt(now) - master.clockAt(now)) / 1000.0 << " us";
+    } else {
+        o << ", no estimate";
+    }
+    return o.str() + "\n" + master.syncReport();
 }
 
 } // namespace PtpTest

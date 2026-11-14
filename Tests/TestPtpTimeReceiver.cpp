@@ -97,6 +97,7 @@ void testFollowsATwoStepMaster() {
     s.delayRespCorrectionNs = 150000;  // 150 us: a wrong sign shows as 150 us of phase
     ScriptedMaster master(s);
     TimeReceiver receiver(receiverConfig());
+    const int failedBefore = checksFailed;
     CHECK(receiver.start(), "the receiver should start");
     // The rate is the slope of the servo's line, which right after lock rests
     // on few Syncs: on a jittery CI runner give it more of them (16 per second)
@@ -112,6 +113,7 @@ void testFollowsATwoStepMaster() {
     CHECK(r.status.master && r.status.master->sender == master.identity(), "the master is the one announcing");
     CHECK(r.status.delayResponses > 0 && master.multicastDelayRequests() > 0 && master.unicastDelayRequests() == 0,
           "Delay_Req is sent to the multicast group");
+    if (checksFailed > failedBefore) std::cerr << describe(receiver.status(), master) << std::endl;
     receiver.stop();
 }
 

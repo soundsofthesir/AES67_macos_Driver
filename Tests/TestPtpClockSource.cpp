@@ -135,6 +135,7 @@ void testFollowsAMaster() {
     const uint32_t generation = device.clock.snapshot().generation;
     ScriptedMaster master(ScriptedMaster::Settings{});
     auto source = device.makeSource();
+    const int failedBefore = checksFailed;
     source->start();
     CHECK(waitFor([&] { return source->receiving(); }, 2), "starts receiving");
     CHECK(waitFor([&] { return source->locked(); }, 20), "locks");
@@ -154,6 +155,7 @@ void testFollowsAMaster() {
     CHECK(device.changes >= 1, "the device was told lock and domain changed");
     CHECK(device.fixedOffset == *source->status().offset && device.fixedGeneration == generation,
           "and given the offset, for its timeline");
+    if (checksFailed > failedBefore) std::cerr << describe(source->status().receiver, master) << std::endl;
     source->stop();
     CHECK(!source->locked() && source->clockDomain() == 0, "stopped: neither locked nor in a domain");
 }
