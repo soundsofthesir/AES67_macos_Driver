@@ -182,9 +182,15 @@ private:
 /// after it arrive past their playout point through no fault of the
 /// receiver, which judges lateness by the kernel's arrival timestamp.
 /// A send counts as late once it is half the link offset behind schedule.
+///
+/// With a stall threshold it also counts stalls: each stretch of sends more
+/// than that threshold behind schedule is one stall, however many sends it
+/// delays, and stalledSends() counts those sends.
 class SendPacer {
 public:
-    explicit SendPacer(std::chrono::nanoseconds period = std::chrono::milliseconds(1)) : period_(period) {}
+    explicit SendPacer(std::chrono::nanoseconds period = std::chrono::milliseconds(1),
+                       std::chrono::nanoseconds stallThreshold = std::chrono::nanoseconds::max())
+        : period_(period), stallThreshold_(stallThreshold) {}
 
     /// Sleep until the next send is due. The schedule starts at the first call,
     /// just after the first send.
@@ -197,18 +203,37 @@ public:
         const auto behind = std::chrono::steady_clock::now() - next_;
         maxBehind_ = std::max(maxBehind_, behind);
         if (behind > kLateThreshold) ++lateSends_;
+        const bool stalled = behind > stallThreshold_;
+        if (stalled) ++stalledSends_;
+        if (stalled && !inStall_) ++stalls_;
+        inStall_ = stalled;
+    }
+
+    /// Start counting afresh, keeping the schedule.
+    void clearCounts() {
+        maxBehind_ = std::chrono::steady_clock::duration{0};
+        lateSends_ = 0;
+        stalls_ = 0;
+        stalledSends_ = 0;
+        inStall_ = false;
     }
 
     uint32_t lateSends() const { return lateSends_; }
+    uint32_t stalls() const { return stalls_; }
+    uint32_t stalledSends() const { return stalledSends_; }
     double maxBehindMs() const { return std::chrono::duration<double, std::milli>(maxBehind_).count(); }
 
 private:
     static constexpr auto kLateThreshold = std::chrono::microseconds(kTestLinkOffset * 1000 / 48 / 2);
     std::chrono::nanoseconds period_;
+    std::chrono::nanoseconds stallThreshold_;
     std::chrono::steady_clock::time_point next_;
     bool started_{false};
     std::chrono::steady_clock::duration maxBehind_{0};
     uint32_t lateSends_{0};
+    uint32_t stalls_{0};
+    uint32_t stalledSends_{0};
+    bool inStall_{false};
 };
 
 } // namespace AES67::TestSupport

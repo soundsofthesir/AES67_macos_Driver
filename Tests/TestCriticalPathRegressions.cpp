@@ -57,6 +57,7 @@
 #include <optional>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -208,6 +209,37 @@ void sendRun(LoopbackSender& sender, std::chrono::steady_clock::time_point& next
 }
 
 const auto kNoSkip = [](uint16_t) { return false; };
+
+// The same, paced by `pacer`, which counts the sends the machine delayed.
+void sendRun(LoopbackSender& sender, SendPacer& pacer, uint16_t firstSeq, uint32_t firstTimestamp, uint16_t count,
+             float value, uint32_t ssrc) {
+    for (uint16_t i = 0; i < count; ++i) {
+        sender.sendL24(static_cast<uint16_t>(firstSeq + i), firstTimestamp + i * kFramesPerPacket, 2, value, ssrc);
+        pacer.wait();
+    }
+}
+
+// A receiver follows a restarted sender after a run of packets covering
+// kSourceSwitchSeconds whose arrival margins agree within a quarter of the
+// link offset. A sender stall longer than that breaks the run, which starts
+// again: counted with this threshold, each stall may cost one more run plus
+// the packets it delayed. Nothing excuses a receiver that never follows.
+constexpr auto kSwitchStallThreshold = std::chrono::microseconds(kTestLinkOffset / 4 * 1000 / 48);
+constexpr size_t kSwitchRunPackets = static_cast<size_t>(RtpPlacement::kSourceSwitchSeconds * 1000 + 0.5);  // 1 ms packets
+
+SendPacer restartPacer() { return SendPacer(std::chrono::milliseconds(1), kSwitchStallThreshold); }
+
+size_t restartPlayLimit(size_t quietLimit, const SendPacer& pacer) {
+    const size_t excused = pacer.stalls() * kSwitchRunPackets + pacer.stalledSends();
+    return quietLimit > excused ? quietLimit - excused : 1;
+}
+
+std::string stallSummary(const SendPacer& pacer) {
+    std::ostringstream out;
+    out << pacer.stalls() << " sender stalls over " << kSwitchStallThreshold.count() / 1000.0 << " ms ("
+        << pacer.stalledSends() << " sends, worst " << pacer.maxBehindMs() << " ms behind)";
+    return out.str();
+}
 
 // RT-safe interface over a harness's receive context plus TX ring buffers
 struct IOFixture {
@@ -1851,20 +1883,22 @@ void testReceiverFollowsSenderRestart() {
     std::cout << "RX follows a sender restart" << std::endl;
 
     RTPReceiver::PlacementStatistics stats{};
-    const auto samples = receiveAndListen("239.69.99.3", 55012, [](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
-        sendRun(sender, next, 1000, 0, 40, 0.25f, 0x12345678, kNoSkip);
+    SendPacer pacer = restartPacer();
+    const auto samples = receiveAndListen("239.69.99.3", 55012, [&pacer](LoopbackSender& sender) {
+        sendRun(sender, pacer, 1000, 0, 40, 0.25f, 0x12345678);
+        pacer.clearCounts();
         // Sender restarts with a new SSRC and unrelated sequence and timestamp bases
-        sendRun(sender, next, 40000, 900000, 200, -0.5f, 0x0BADF00D, kNoSkip);
+        sendRun(sender, pacer, 40000, 900000, 200, -0.5f, 0x0BADF00D);
     }, &stats);
 
     // The switch waits for 50 ms of packets whose arrival agrees: a jittery
-    // machine restarts that run, so it is a timing limit (never following
-    // plays none)
-    const size_t restarted = countNear(samples, -0.5f);
-    std::cout << "  restarted sender: " << restarted / kFramesPerPacket << " of 200 packets played" << std::endl;
-    CHECK(restarted >= TestWait::timingLimit<size_t>(150, 75) * kFramesPerPacket,
-          "audio from the restarted sender should play promptly (got " << restarted / kFramesPerPacket << " packets)");
+    // machine restarts that run, so the quiet limit is a timing limit, and
+    // each sender stall may cost one more run (never following plays none)
+    const size_t restarted = countNear(samples, -0.5f) / kFramesPerPacket;
+    const size_t limit = restartPlayLimit(TestWait::timingLimit<size_t>(150, 75), pacer);
+    std::cout << "  restarted sender: " << restarted << " of 200 packets played, " << stallSummary(pacer) << std::endl;
+    CHECK(restarted >= limit, "audio from the restarted sender should play promptly (got " << restarted
+                                  << " packets, want " << limit << ", " << pacer.stalls() << " sender stalls)");
     CHECK(stats.reanchors >= 1, "the restart should re-anchor");
 }
 
@@ -1928,18 +1962,20 @@ void testInterleavedSecondSourceIsIgnored() {
 }
 
 void runRestartBehindPlayout(const char* group, uint16_t port, uint32_t restartSsrc, const char* label) {
-    const auto samples = receiveAndListen(group, port, [restartSsrc](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
-        sendRun(sender, next, 6000, 200 * kFramesPerPacket, 60, 0.25f, 0x12345678, kNoSkip);
+    SendPacer pacer = restartPacer();
+    const auto samples = receiveAndListen(group, port, [restartSsrc, &pacer](LoopbackSender& sender) {
+        sendRun(sender, pacer, 6000, 200 * kFramesPerPacket, 60, 0.25f, 0x12345678);
+        pacer.clearCounts();
         // Restart with timestamps ~150 packets behind where playout has reached
-        sendRun(sender, next, 5900, 110 * kFramesPerPacket, 150, -0.5f, restartSsrc, kNoSkip);
+        sendRun(sender, pacer, 5900, 110 * kFramesPerPacket, 150, -0.5f, restartSsrc);
     });
 
-    std::cout << "  " << label << ": " << countNear(samples, -0.5f) / kFramesPerPacket << " of 150 packets played" << std::endl;
+    const size_t played = countNear(samples, -0.5f) / kFramesPerPacket;
+    const size_t limit = restartPlayLimit(TestWait::timingLimit<size_t>(100, 30), pacer);
+    std::cout << "  " << label << ": " << played << " of 150 packets played, " << stallSummary(pacer) << std::endl;
     // As above: how soon the restart is followed is a timing limit
-    CHECK(countNear(samples, -0.5f) >= TestWait::timingLimit<size_t>(100, 30) * kFramesPerPacket,
-          label << ": the restarted stream should play (got " << countNear(samples, -0.5f) / kFramesPerPacket
-                << " of 150 packets)");
+    CHECK(played >= limit, label << ": the restarted stream should play (got " << played << " of 150 packets, want "
+                                 << limit << ", " << pacer.stalls() << " sender stalls)");
 }
 
 void testRestartBehindPlayoutIsFollowed() {
