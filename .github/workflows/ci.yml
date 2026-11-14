@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ASPL_VERSION: v3.1.2
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.name }})
+    # macOS 14: Sequoia's Local Network privacy blocks the multicast tests for
+    # binaries that can't be granted the permission on a CI runner
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The configuration the README tells people to build: universal, Release
+          - name: release
+            cmake_args: -DCMAKE_BUILD_TYPE=Release
+          # ASan + UBSan over the whole suite, arm64 only to keep it quick
+          - name: sanitizers
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE=ON -DCMAKE_OSX_ARCHITECTURES=arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # libASPL isn't in Homebrew. Build the pinned release universal, so the
+      # universal driver build can link it, and install into /usr/local, where
+      # CMakeLists.txt looks for it.
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@v4
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-14
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Install libASPL
+        run: |
+          sudo mkdir -p /usr/local/include /usr/local/lib
+          sudo cp -R aspl-prefix/include/aspl /usr/local/include/
+          sudo cp aspl-prefix/lib/libASPL.a /usr/local/lib/
+
+      - name: Configure
+        run: cmake -S . -B build ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      # Serial: several tests share multicast groups and ports (#132)
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure --timeout 600
+
+  linux-portable:
+    # The tests that don't need Core Audio or macOS socket options, under
+    # ASan + UBSan with a second standard library and compiler
+    name: Linux portable tests (${{ matrix.cxx }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Shared/Types.h includes <uuid/uuid.h> for uuid_t; macOS has it in the SDK
+      - name: Install libuuid headers
+        run: sudo apt-get update && sudo apt-get install -y uuid-dev
+
+      - name: Build and run
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: Tests/Linux/run-portable-tests.sh build-linux
+
+      # Every input in Tests/Fuzz/corpus, once, through the parser fuzz targets
+      # (libFuzzer needs clang). Open-ended fuzzing runs nightly in fuzz.yml.
+      - name: Replay fuzz corpus
+        if: matrix.cxx == 'clang++'
+        run: Tests/Fuzz/run-fuzzers.sh 0 build-fuzz

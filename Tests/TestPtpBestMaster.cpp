@@ -9,6 +9,7 @@
 #include "../NetworkEngine/PTP/PtpBestMaster.h"
 #include <cmath>
 #include <iostream>
+#include <random>
 
 using namespace AES67::Ptp;
 
@@ -210,6 +211,59 @@ void testAnnounceIntervalLimits() {
     }
 }
 
+void testAnnounceFloodIsBounded() {
+    std::cout << "A flood of identities cannot grow the table or push out the master" << std::endl;
+    BestMaster bmc(config());
+    Master legit = master(1);
+    double now = 0;
+    qualify(bmc, legit, now);
+    CHECK(bmc.selected() && bmc.selected()->sender == legit.sender, "the master is followed");
+
+    // 1000 random identities, each a better clock, within one second
+    std::mt19937 random(108);
+    for (int i = 0; i < 1000; ++i) {
+        Master m;
+        for (auto& byte : m.sender.clock.bytes) byte = uint8_t(random());
+        m.sender.port = uint16_t(random());
+        m.body.grandmasterIdentity = m.sender.clock;
+        m.body.grandmasterPriority1 = 0;
+        bmc.onAnnounce(announceFrom(m), now + i * 0.001);
+    }
+    now += 1.0;
+    CHECK(bmc.masterCount() <= 16, "at most 16 masters tracked, got " << bmc.masterCount());
+    CHECK(bmc.selected() && bmc.selected()->sender == legit.sender, "the master is still followed");
+    now += 1.0;
+    bmc.onAnnounce(announceFrom(legit), now);
+    CHECK(bmc.selected() && bmc.selected()->sender == legit.sender, "and keeps being followed");
+
+    // Once the flood falls silent past its timeout, a new master gets in
+    for (int i = 0; i < 4; ++i) {
+        now += 2.0;
+        bmc.onAnnounce(announceFrom(legit), now);
+    }
+    Master better = master(2);
+    better.body.grandmasterPriority1 = 10;
+    qualify(bmc, better, now);
+    CHECK(bmc.selected() && bmc.selected()->sender == better.sender, "a new master enters and is selected");
+    CHECK(bmc.masterCount() <= 16, "still bounded");
+}
+
+void testFastAnnouncerQualifiesAsBefore() {
+    std::cout << "A master announcing far faster than its interval qualifies as before" << std::endl;
+    BestMaster::Config c = config();
+    c.foreignMasterThreshold = 3;
+    BestMaster bmc(c);
+    Master m = master(5);  // claims every 2 s: window 8 s, timeout 6 s
+    double now = 0;
+    for (int i = 0; i < 2; ++i, now += 0.001) bmc.onAnnounce(announceFrom(m), now);
+    CHECK(!bmc.selected(), "two announces are below a threshold of three");
+    for (int i = 0; i < 100000; ++i, now += 0.0001) bmc.onAnnounce(announceFrom(m), now);
+    const double last = now - 0.0001;
+    CHECK(bmc.selected() && bmc.selected()->sender == m.sender, "a burst qualifies it");
+    CHECK(!bmc.tick(last + 5.9) && bmc.selected(), "still followed inside its timeout");
+    CHECK(bmc.tick(last + 6.1) && !bmc.selected(), "dropped after it");
+}
+
 } // namespace
 
 int main() {
@@ -219,6 +273,8 @@ int main() {
     testFallsBackToTheNextMaster();
     testIgnoredAnnounces();
     testAnnounceIntervalLimits();
+    testAnnounceFloodIsBounded();
+    testFastAnnouncerQualifiesAsBefore();
 
     std::cout << "\nPTP best master: " << checksPassed << " passed, " << checksFailed << " failed" << std::endl;
     return checksFailed == 0 ? 0 : 1;

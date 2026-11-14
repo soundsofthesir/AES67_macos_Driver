@@ -4,6 +4,7 @@
 #pragma once
 
 #include "PtpMessages.h"
+#include <cstddef>
 #include <deque>
 #include <map>
 #include <optional>
@@ -34,6 +35,7 @@ public:
         uint8_t announceReceiptTimeout{3};  // intervals of silence before a master is dropped
         int foreignMasterThreshold{2};      // announces needed within the window to qualify
         int foreignMasterWindow{4};         // the window, in the master's announce intervals
+        std::size_t maxForeignMasters{16};  // masters tracked at once: more are ignored, not evicted
     };
 
     BestMaster() : BestMaster(Config{}) {}
@@ -49,13 +51,16 @@ public:
 
     std::optional<Candidate> selected() const;
 
+    /// How many masters are being tracked (at most maxForeignMasters).
+    std::size_t masterCount() const { return masters_.size(); }
+
     /// Dataset comparison (clause 9.3.4): negative if `a` is the better master.
     static int compare(const Candidate& a, const Candidate& b);
 
 private:
     struct Record {
         Candidate latest;
-        std::deque<double> arrivals;  // within the qualification window
+        std::deque<double> arrivals;  // the latest, within the qualification window
         double lastSeen{0.0};
     };
 

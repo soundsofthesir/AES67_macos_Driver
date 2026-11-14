@@ -46,7 +46,12 @@ Next up is trying PTP and sending on a real network with Dante, RAVENNA and othe
 
 ```bash
 brew install cmake
-brew tap gavv/gavv && brew install libaspl
+
+# libASPL isn't in Homebrew: build it universal and install into /usr/local
+git clone --depth 1 --branch v3.1.2 https://github.com/gavv/libASPL.git
+cmake -S libASPL -B libASPL/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build libASPL/build -j
+sudo cmake --install libASPL/build
 
 git clone https://github.com/soundsofthesir/AES67_macos_Driver.git
 cd AES67_macos_Driver
@@ -97,6 +102,8 @@ PTP is off unless `ptp.json` turns it on. It's looked for in `$AES67_PTP_CONFIG_
 
 ## Testing tools
 
+- CI (`.github/workflows/ci.yml`) builds and runs `ctest` on macOS in Release and with AddressSanitizer + UndefinedBehaviorSanitizer (`-DAES67_SANITIZE=ON`), and runs the tests that need no Apple frameworks on Linux with both sanitizers (`Tests/Linux/run-portable-tests.sh`).
+- `Tests/Fuzz/run-fuzzers.sh` fuzzes the parsers that read network packets and config files (PTP, SAP, SDP, `streams.json`, `ptp.json`) with libFuzzer on Linux. CI replays `Tests/Fuzz/corpus` on every PR, and fuzzes each parser for 5 minutes nightly (`.github/workflows/fuzz.yml`).
 - `ctest` runs 25 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
 - `AES67TestSender` sends a test tone **onto your network** (default 239.1.1.1:5004).
 - `AES67ClockProbeClient` measures the device's clock and checks the audio is continuous. Build it with `-DBUILD_SPIKES=ON`.

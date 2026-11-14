@@ -13,11 +13,25 @@ combined-pkg/
 *.a
 *.o
 
-# CMake
+# CMake (including in-source builds)
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 install_manifest.txt
+Makefile
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+Testing/
+_CPack_Packages/
+
+# Test and example executables from an in-source build (no extension)
+/Tests/Test*
+!/Tests/Test*.*
+/Tests/Benchmark*
+!/Tests/Benchmark*.*
+/Examples/*
+!/Examples/*.*
 
 # Xcode
 *.pbxuser

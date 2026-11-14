@@ -88,7 +88,10 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
                 const std::vector<Sample> confirmed = stepCandidates_;
                 reset();
                 for (const auto& s : confirmed) addSample(s);
-            } else {
+            } else if (state_ != State::Holdover) {
+                // A rejected Sync says nothing good about the line: holdover
+                // ends on an accepted Sync, a confirmed step or the holdover
+                // time limit, not here
                 judgeLock();
             }
             return;
