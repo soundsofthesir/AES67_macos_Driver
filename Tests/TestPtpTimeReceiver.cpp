@@ -35,8 +35,9 @@ namespace {
 // phase error, so it gets 500 us (still far from an unlocked receiver)
 const double kPhaseLimitNs = AES67::TestWait::timingLimit(100000.0, 500000.0);
 // The master runs at +100 ppm, so a receiver that didn't follow its rate is
-// 100 ppm out: the relaxed limit still catches that, but not a shared CI
-// runner's scheduling (30-40 ppm seen a second after lock)
+// 100 ppm out: the relaxed limit still catches that. On CI the rate is also
+// read after a longer settle (testFollowsATwoStepMaster), which is what
+// keeps runner noise inside it, not a still wider limit
 const double kRateLimitPpm = AES67::TestWait::timingLimit(20.0, 60.0);
 
 int checksPassed = 0;
@@ -63,13 +64,14 @@ struct Result {
     TimeReceiver::Status status;
 };
 
-Result waitForLock(TimeReceiver& receiver, const ScriptedMaster& master, double seconds) {
+Result waitForLock(TimeReceiver& receiver, const ScriptedMaster& master, double seconds,
+                   std::chrono::milliseconds settle = std::chrono::milliseconds(1000)) {
     Result r;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int>(seconds * 1000));
     while (std::chrono::steady_clock::now() < deadline) {
         r.status = receiver.status();
         if (r.status.state == Servo::State::Locked && r.status.estimate) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));  // settle a little further
+            std::this_thread::sleep_for(settle);  // settle a little further
             r.status = receiver.status();
             const uint64_t now = hostNanos();
             r.locked = r.status.state == Servo::State::Locked;
@@ -96,7 +98,11 @@ void testFollowsATwoStepMaster() {
     ScriptedMaster master(s);
     TimeReceiver receiver(receiverConfig());
     CHECK(receiver.start(), "the receiver should start");
-    const Result r = waitForLock(receiver, master, 20);
+    // The rate is the slope of the servo's line, which right after lock rests
+    // on few Syncs: on a jittery CI runner give it more of them (16 per second)
+    // before reading it, rather than widening the limit further
+    const Result r = waitForLock(receiver, master, 25,
+                                 AES67::TestWait::timingLimit(std::chrono::milliseconds(1000), std::chrono::milliseconds(5000)));
     std::cout << "  phase " << r.phaseErrorNs / 1000 << " us, rate " << r.rateErrorPpm << " ppm, path delay "
               << r.status.pathDelayNs / 1000 << " us" << std::endl;
     CHECK(r.locked, "locks to the master");
