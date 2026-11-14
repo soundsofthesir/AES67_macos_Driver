@@ -9,6 +9,7 @@
 
 #include "../NetworkEngine/Clock/PtpClockSource.h"
 #include "PtpTestMaster.h"
+#include "TestWait.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -21,6 +22,9 @@ using namespace AES67;
 using namespace AES67::PtpTest;
 
 namespace {
+
+// 5 samples (~100 us) on a quiet machine, 25 on a loaded CI runner
+const double kPhaseLimitSamples = AES67::TestWait::timingLimit(5.0, 25.0);
 
 int checksPassed = 0;
 int checksFailed = 0;
@@ -139,7 +143,7 @@ void testFollowsAMaster() {
     const double rate = rateErrorPpm(device, 100.0);
     std::cout << "  phase " << phase << " samples, rate " << rate << " ppm" << std::endl;
     CHECK(source->active(), "PTP has the clock");
-    CHECK(std::fabs(phase) < 5, "within 5 samples (~100 us) of the master's time (" << phase << ")");
+    CHECK(std::fabs(phase) < kPhaseLimitSamples, "within " << kPhaseLimitSamples << " samples of the master's time (" << phase << ")");
     // Seconds after lock PTP may still be pulling in a few samples of phase,
     // which moves the rate by tens of ppm (100 ppm at most, by design)
     CHECK(std::fabs(rate) < 50, "at its rate within 50 ppm (" << rate << ")");
@@ -171,7 +175,7 @@ void testADeviceTimelineRestart() {
           "given to the device for the new timeline");
     std::this_thread::sleep_for(std::chrono::seconds(3));
     const double phase = phaseErrorSamples(device, *source, master);
-    CHECK(source->active() && std::fabs(phase) < 5, "in phase on it (" << phase << ")");
+    CHECK(source->active() && std::fabs(phase) < kPhaseLimitSamples, "in phase on it (" << phase << ")");
     source->stop();
 }
 

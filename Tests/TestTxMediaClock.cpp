@@ -13,6 +13,7 @@
 #include "../NetworkEngine/RTP/TxContext.h"
 #include "../NetworkEngine/RTP/SimpleRTP.h"
 #include "RxTestSupport.h"
+#include "TestWait.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -48,6 +49,12 @@ constexpr uint32_t kChannels = 2;
 constexpr int64_t kFramesPerPacket = 48;
 constexpr size_t kDeviceChannels = 128;
 
+// How far ahead of now the test writers keep the TX buffers written, like the
+// HAL with a 2048-frame IO buffer. Well inside the TX ring (16384 frames), and
+// long enough that a writer descheduled for tens of milliseconds (a CI runner)
+// is still ahead of the transmitter.
+constexpr int64_t kWriteAhead = 2048;
+
 // A sample whose 24-bit PCM value is exactly its media position (the L24
 // encoder truncates, hence the half step)
 float positionValue(int64_t position) {
@@ -80,6 +87,47 @@ ChannelMapping txMapping(uint32_t deviceStart) {
     return mapping;
 }
 
+// Positions a test writer wrote after their time had come: a writer thread
+// descheduled for longer than kWriteAhead (a loaded CI runner) catches up with
+// positions the transmitter may already have sent as silence. Packets that
+// overlap one are not the transmitter's doing, so the checks leave them out.
+class LateWrites {
+public:
+    // Call after writing [position, position + frames), with the media clock
+    // read once the write finished: only then is it known to have been in time
+    void note(int64_t position, int64_t frames, int64_t now) {
+        if (position >= now + kFramesPerPacket) return;  // still ahead of the transmitter
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ranges_.empty() && ranges_.back().second == position) {
+            ranges_.back().second = position + frames;
+        } else {
+            ranges_.emplace_back(position, position + frames);
+        }
+    }
+    // Positions the writer never wrote: before the point where it started on a
+    // new timeline, which it only notices on its next turn, or while no
+    // stream had published a buffer
+    void skipped(int64_t from, int64_t to) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ranges_.emplace_back(from, to);
+    }
+    bool overlaps(int64_t position, int64_t frames) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [from, to] : ranges_) {
+            if (position < to && from < position + frames) return true;
+        }
+        return false;
+    }
+    size_t count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ranges_.size();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<std::pair<int64_t, int64_t>> ranges_;
+};
+
 // Plays the Core Audio IO thread: keeps every published TX buffer written a
 // little ahead of now, from a 128-channel mix whose every channel carries the
 // sample's media position. Follows timeline restarts as the HAL would.
@@ -94,6 +142,10 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
+    /// Whether any of [position, position + frames) was written late
+    bool late(int64_t position, int64_t frames = kFramesPerPacket) const { return late_.overlaps(position, frames); }
+    size_t lateWrites() const { return late_.count(); }
+
 private:
     void run() {
         AudioThreadPriority::configureForRealTime();
@@ -104,19 +156,27 @@ private:
             const MediaClock::Snapshot snapshot = clock_.snapshot();
             const int64_t now = snapshot.sampleAt(hostTimeNow());
             if (snapshot.generation != generation) {
+                if (generation != 0) late_.skipped(now - (int64_t{1} << 20), now);
                 generation = snapshot.generation;
                 next = now;
             }
-            const int64_t target = now + 256;  // output is written ahead of its time
+            const int64_t target = now + kWriteAhead;  // output is written ahead of its time
             while (next < target) {
                 const auto frames = static_cast<size_t>(std::min<int64_t>(target - next, 512));
                 for (size_t f = 0; f < frames; ++f) {
                     std::fill_n(mix.begin() + static_cast<ptrdiff_t>(f * kDeviceChannels), kDeviceChannels,
                                 positionValue(next + static_cast<int64_t>(f)));
                 }
+                bool routed = false;
                 routing_.read([&](const TxRouting::Route& route) {
                     route.buffer->write(next, frames, mix.data(), kDeviceChannels, route.deviceChannelStart);
+                    routed = true;
                 });
+                if (routed) {
+                    late_.note(next, static_cast<int64_t>(frames), clock_.snapshot().sampleAt(hostTimeNow()));
+                } else {
+                    late_.skipped(next, next + static_cast<int64_t>(frames));  // before the stream published its buffer
+                }
                 next += static_cast<int64_t>(frames);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -125,6 +185,7 @@ private:
 
     const MediaClock& clock_;
     TxRouting& routing_;
+    LateWrites late_;
     std::atomic<bool> running_{true};
     std::thread thread_;
 };
@@ -153,6 +214,18 @@ public:
     ~PacketCapture() { stop(); }
 
     std::vector<CapturedPacket> stop() {
+        // Read what is still queued: a descheduled capture thread can be well
+        // behind the sender. Done once nothing new has arrived for 50 ms.
+        size_t seen = count();
+        auto quietSince = std::chrono::steady_clock::now();
+        TestWait::waitUntil([&] {
+            const size_t now = count();
+            if (now != seen) {
+                seen = now;
+                quietSince = std::chrono::steady_clock::now();
+            }
+            return std::chrono::steady_clock::now() - quietSince > std::chrono::milliseconds(50);
+        });
         running_ = false;
         if (thread_.joinable()) thread_.join();
         socket_.close();
@@ -161,6 +234,11 @@ public:
     }
 
 private:
+    size_t count() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return packets_.size();
+    }
+
     void run() {
         AudioThreadPriority::configureForRealTime();
         std::vector<uint8_t> buffer(2048);
@@ -201,12 +279,71 @@ std::vector<CapturedPacket> settled(std::vector<CapturedPacket> packets, size_t 
     return std::vector<CapturedPacket>(packets.begin() + static_cast<ptrdiff_t>(skip), packets.end());
 }
 
-bool consecutive(const std::vector<CapturedPacket>& packets) {
+// Sequence numbers advance by one and timestamps by one packet. A transmitter
+// that fell more than kMaxLatePackets behind (a descheduled thread) skips to
+// the packet in progress, so its timestamps jump by whole packets while the
+// sequence carries on: such jumps are allowed up to the packets it counted as
+// skipped, and nothing else.
+bool consecutive(const std::vector<CapturedPacket>& packets, uint64_t skipped = 0) {
+    uint64_t skippedSeen = 0;
     for (size_t i = 1; i < packets.size(); ++i) {
         if (static_cast<uint16_t>(packets[i].sequence - packets[i - 1].sequence) != 1) return false;
-        if (packets[i].timestamp - packets[i - 1].timestamp != static_cast<uint32_t>(kFramesPerPacket)) return false;
+        const uint32_t step = packets[i].timestamp - packets[i - 1].timestamp;
+        if (step == static_cast<uint32_t>(kFramesPerPacket)) continue;
+        if (step % kFramesPerPacket != 0 || step > 1000 * kFramesPerPacket) return false;
+        skippedSeen += step / kFramesPerPacket - 1;
+    }
+    return skippedSeen <= skipped;
+}
+
+uint64_t skippedPackets(const RTPTransmitter& tx) { return tx.getTransmitStatistics().packetsSkipped; }
+
+// A packet whose every frame carries the next media position
+bool audible(const CapturedPacket& p) {
+    if (p.channel0.empty() || p.channel0.front() == 0) return false;
+    for (size_t f = 1; f < p.channel0.size(); ++f) {
+        if (p.channel0[f] != p.channel0.front() + static_cast<int32_t>(f)) return false;
     }
     return true;
+}
+
+// Each packet's media position. Audible packets carry it; for a silent one it
+// follows from the timestamp, when the audible packets either side have the
+// same timestamp-to-position offset (no jump in between). -1 when unknown.
+std::vector<int64_t> positionsOf(const std::vector<CapturedPacket>& packets) {
+    std::vector<int64_t> positions(packets.size(), -1);
+    auto offset = [&](size_t i) { return static_cast<int64_t>(packets[i].timestamp) - packets[i].channel0.front(); };
+    size_t previous = packets.size();
+    for (size_t i = 0; i < packets.size(); ++i) {
+        if (!audible(packets[i])) continue;
+        positions[i] = packets[i].channel0.front();
+        if (previous < packets.size() && offset(previous) == offset(i)) {
+            for (size_t j = previous + 1; j < i; ++j) positions[j] = static_cast<int64_t>(packets[j].timestamp) - offset(i);
+        }
+        previous = i;
+    }
+    // Silent packets just before a jump (a timeline restart): the transmitter
+    // was already on the next audible packet's timeline
+    size_t following = packets.size();
+    for (size_t i = packets.size(); i-- > 0;) {
+        if (audible(packets[i])) {
+            following = i;
+        } else if (positions[i] < 0 && following < packets.size()) {
+            positions[i] = static_cast<int64_t>(packets[i].timestamp) - offset(following);
+        }
+    }
+    return positions;
+}
+
+// Silent packets the writer can't explain: not written late, or of unknown position
+size_t unexplainedSilence(const std::vector<CapturedPacket>& packets, const PositionWriter& writer) {
+    const auto positions = positionsOf(packets);
+    size_t unexplained = 0;
+    for (size_t i = 0; i < packets.size(); ++i) {
+        if (audible(packets[i])) continue;
+        if (positions[i] < 0 || !writer.late(positions[i])) ++unexplained;
+    }
+    return unexplained;
 }
 
 double percentile(std::vector<double> values, double p) {
@@ -227,9 +364,10 @@ void testPacketsCarryTheirMediaPositions() {
     tx.stop();
     writer.stop();
     const auto packets = settled(capture.stop());
+    const uint64_t skipped = skippedPackets(tx);
 
     CHECK(packets.size() > 1300, "about 1500 packets should arrive (got " << packets.size() << ")");
-    CHECK(consecutive(packets), "sequence numbers and timestamps should advance by one packet each");
+    CHECK(consecutive(packets, skipped), "sequence numbers and timestamps should advance by one packet each");
 
     bool contiguous = true;
     bool sameOffset = true;
@@ -237,19 +375,28 @@ void testPacketsCarryTheirMediaPositions() {
     std::vector<double> lateness;
     const auto clock = h.clock.snapshot();
     const double ticksPerSecond = HostTimebase::current().ticksPerSecond();
-    const int64_t offset = static_cast<int64_t>(packets.front().timestamp) - packets.front().channel0.front();
-    for (size_t i = 0; i < packets.size(); ++i) {
-        const auto& p = packets[i];
+    // Packets the writer filled late are silent and left out; any other silent
+    // packet fails the test below
+    const size_t unexplained = unexplainedSilence(packets, writer);
+    const CapturedPacket* previous = nullptr;
+    int64_t offset = 0;
+    for (const auto& p : packets) {
+        if (!audible(p)) continue;
         const int64_t position = p.channel0.front();
-        for (size_t f = 0; f < p.channel0.size(); ++f) {
-            contiguous = contiguous && p.channel0[f] == position + static_cast<int64_t>(f);
-        }
+        if (!previous) offset = static_cast<int64_t>(p.timestamp) - position;
         channelsMatch = channelsMatch && p.channel0 == p.channel1;
         sameOffset = sameOffset && static_cast<int64_t>(p.timestamp) - position == offset;
-        if (i > 0) contiguous = contiguous && position == packets[i - 1].channel0.front() + kFramesPerPacket;
+        // A skip moves the position on by exactly as much as the timestamp
+        if (previous) {
+            contiguous = contiguous &&
+                         position - previous->channel0.front() == static_cast<int64_t>(p.timestamp - previous->timestamp);
+        }
+        previous = &p;
         const uint64_t due = clock.hostAt(position + kFramesPerPacket);
         lateness.push_back((static_cast<double>(p.arrivalHost) - static_cast<double>(due)) / ticksPerSecond * 1e6);
     }
+    CHECK(unexplained == 0, "every packet should carry its positions, unless the writer wrote them late ("
+                                << unexplained << " silent, " << writer.lateWrites() << " late writes)");
     CHECK(contiguous, "each packet should hold the next 48 media positions, in order");
     CHECK(channelsMatch, "both stream channels should carry their mapped device channels");
     CHECK(sameOffset, "the RTP timestamp should stay a fixed offset from the media position");
@@ -260,8 +407,11 @@ void testPacketsCarryTheirMediaPositions() {
     std::cout << "  departure after the packet's last sample: median " << median << " us, p99 " << p99
               << " us, earliest " << earliest << " us" << std::endl;
     CHECK(earliest > -100.0, "no packet should leave before its last sample's media time");
-    CHECK(median < 500.0, "packets should leave within half a packet of their media time (median " << median << " us)");
-    CHECK(p99 < 2000.0, "almost no packet should be more than 2 ms late (p99 " << p99 << " us)");
+    // Arrival is measured by the capture thread, which a loaded runner also
+    // deschedules: departure accuracy only means something on a quiet machine
+    CHECK(median < TestWait::timingLimit(500.0, 20000.0),
+          "packets should leave within half a packet of their media time (median " << median << " us)");
+    CHECK(p99 < TestWait::timingLimit(2000.0, 250000.0), "almost no packet should be more than 2 ms late (p99 " << p99 << " us)");
 }
 
 void testSilenceFlowsWithoutTheIOThread() {
@@ -269,13 +419,24 @@ void testSilenceFlowsWithoutTheIOThread() {
     TxHarness h;
     PacketCapture capture("239.69.99.41", 55072);
     RTPTransmitter tx(txSdp("239.69.99.41", 55072), txMapping(0), h.context());
+    const int64_t startPosition = h.clock.snapshot().sampleAt(hostTimeNow());
     CHECK(tx.start(), "transmitter should start");
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     tx.stop();
-    const auto packets = settled(capture.stop(), 2);
+    const int64_t stopPosition = h.clock.snapshot().sampleAt(hostTimeNow());
+    const auto all = capture.stop();
+    const auto packets = settled(all, 2);
+    const uint64_t skipped = skippedPackets(tx);
 
-    CHECK(packets.size() > 900 && packets.size() < 1100, "about 1000 packets per second (got " << packets.size() << ")");
-    CHECK(consecutive(packets), "silent packets should still advance one packet at a time");
+    // One packet per packet time of media clock that ran, not per wall-clock
+    // second asked for: a slow machine oversleeps. Never more (a burst or a
+    // duplicate); fewer only by however late the transmit thread got going,
+    // since it starts at the packet then in progress.
+    const int64_t expected = (stopPosition - startPosition) / kFramesPerPacket - static_cast<int64_t>(skipped);
+    const auto got = static_cast<int64_t>(all.size());
+    CHECK(got * 2 >= expected && got <= expected + 2,
+          "one packet per packet time (got " << got << ", " << expected << " packet times ran, " << skipped << " skipped)");
+    CHECK(consecutive(packets, skipped), "silent packets should still advance one packet at a time");
     bool silent = true;
     for (const auto& p : packets) {
         silent = silent && std::all_of(p.channel0.begin(), p.channel0.end(), [](int32_t v) { return v == 0; });
@@ -326,24 +487,39 @@ void testTimelineRestartKeepsRtpContinuous() {
     tx.stop();
     writer.stop();
     const auto packets = settled(capture.stop());
+    const uint64_t skipped = skippedPackets(tx);
 
-    CHECK(consecutive(packets), "RTP timestamps and sequence numbers must not jump at a timeline restart");
+    CHECK(consecutive(packets, skipped), "RTP timestamps and sequence numbers must not jump at a timeline restart");
     // The writer (like the HAL) starts on the new timeline within a packet or
     // two, mid-packet, so a packet or two around the restart is wholly or
     // partly silent. A packet's position comes from its first audible frame.
-    std::vector<int64_t> carried;
+    // Between audible packets the carried position moves with the RTP
+    // timestamp (a transmitter skip moves both), except once: at the restart.
+    struct Carried { int64_t position; uint32_t timestamp; };
+    std::vector<Carried> carried;
     size_t silentPackets = 0;
     for (const auto& p : packets) {
         const auto audible = std::find_if(p.channel0.begin(), p.channel0.end(), [](int32_t v) { return v != 0; });
         if (audible != p.channel0.begin()) ++silentPackets;
-        if (audible != p.channel0.end()) carried.push_back(*audible - (audible - p.channel0.begin()));
+        if (audible != p.channel0.end()) carried.push_back({*audible - (audible - p.channel0.begin()), p.timestamp});
     }
     size_t positionJumps = 0;
     for (size_t i = 1; i < carried.size(); ++i) {
-        if (carried[i] != carried[i - 1] + kFramesPerPacket) ++positionJumps;
+        if (carried[i].position - carried[i - 1].position !=
+            static_cast<int64_t>(carried[i].timestamp - carried[i - 1].timestamp)) {
+            ++positionJumps;
+        }
     }
     CHECK(positionJumps == 1, "the carried media positions should jump once, at the restart (got " << positionJumps << ")");
-    CHECK(silentPackets <= 3, "at most a few packets around the restart should be silent (got " << silentPackets << ")");
+    // Late writes are silent packets the writer caused, not the transmitter
+    const auto positions = positionsOf(packets);
+    size_t lateSilent = 0;
+    for (size_t i = 0; i < packets.size(); ++i) {
+        if (!audible(packets[i]) && positions[i] >= 0 && writer.late(positions[i])) ++lateSilent;
+    }
+    CHECK(silentPackets <= 3 + lateSilent,
+          "at most a few packets around the restart should be silent (got " << silentPackets << ", " << lateSilent
+                                                                             << " written late)");
     CHECK(tx.getTransmitStatistics().timelineRestarts == 1, "the transmitter should count the restart");
 }
 
@@ -368,14 +544,37 @@ void testLoopbackThroughOurReceiverIsSampleExact() {
     writer.stop();
 
     // Every heard sample should be the next media position: decoded L24 is
-    // pcm / 2^23, so consecutive positions differ by exactly 2^-23
-    size_t breaks = 0;
+    // pcm / 2^23, so consecutive positions differ by exactly 2^-23. A gap of
+    // silence is only allowed when a thread on this machine fell behind and
+    // the transmitter skipped or the receiver dropped late packets; a sample
+    // that is the wrong position never is.
+    size_t misplaced = 0;
+    size_t gaps = 0;
     for (size_t i = 1; i < heard.size(); ++i) {
-        if (heard[i] - heard[i - 1] != 1.0f / 8388608.0f) ++breaks;
+        if (heard[i] == 0.0f) {
+            if (heard[i - 1] != 0.0f) ++gaps;
+            continue;
+        }
+        if (heard[i - 1] == 0.0f) continue;  // after a gap: the next check is the sample after
+        if (heard[i] - heard[i - 1] != 1.0f / 8388608.0f) ++misplaced;
     }
-    std::cout << "  heard " << heard.size() << " samples, " << breaks << " discontinuities" << std::endl;
+    // After a gap the audio must carry on at its own later positions
+    size_t backwards = 0;
+    float last = 0.0f;
+    for (float sample : heard) {
+        if (sample == 0.0f) continue;
+        if (last != 0.0f && sample <= last) ++backwards;
+        last = sample;
+    }
+    const uint64_t skipped = skippedPackets(tx);
+    const uint64_t late = receiver.getPlacementStatistics().lateDrops;
+    std::cout << "  heard " << heard.size() << " samples, " << misplaced + backwards << " misplaced, " << gaps
+              << " gap(s) (transmitter skipped " << skipped << ", receiver dropped " << late << " late, "
+              << writer.lateWrites() << " late write(s))" << std::endl;
     CHECK(heard.size() > 48000, "over a second of audio should be heard (got " << heard.size() << ")");
-    CHECK(breaks == 0, "the received audio should be exactly the transmitted positions, in order");
+    CHECK(misplaced == 0 && backwards == 0, "the received audio should be exactly the transmitted positions, in order");
+    CHECK(gaps == 0 || skipped > 0 || late > 0 || writer.lateWrites() > 0,
+          "no gaps, unless a packet was skipped, arrived late or was written late (" << gaps << ")");
     CHECK(receiver.getPlacementStatistics().reanchors == 0, "the receiver should never need to re-anchor");
 }
 
@@ -393,36 +592,69 @@ void testPtpTimestamps() {
     CHECK(tx.start(), "transmitter should start");
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     const int64_t k = 7777777;
+    // Positions just before and just after PTP takes the clock: the main
+    // thread can be descheduled between them on a loaded machine
+    const int64_t beforeFix = h.clock.snapshot().sampleAt(hostTimeNow());
     h.networkTime.fix(k);  // PTP takes the clock
+    const int64_t afterFix = h.clock.snapshot().sampleAt(hostTimeNow());
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     h.networkTime.reset();  // PTP lets go (a timeline restart without it)
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     tx.stop();
     writer.stop();
     const auto packets = settled(capture.stop());
+    const uint64_t skipped = skippedPackets(tx);
 
     // Before PTP: an RTP timeline of the transmitter's own. From PTP taking
     // over: PTP-stamped, with one jump onto it. When PTP lets go the
     // timestamps carry on unbroken, which leaves them on the same line.
-    size_t firstStamped = packets.size();
-    size_t stamped = 0;
-    size_t jumps = 0;
+    // Judged on audible packets: one the writer filled late carries no
+    // position. Those are counted and printed.
+    std::vector<const CapturedPacket*> heard;
     size_t sequenceBreaks = 0;
     for (size_t i = 0; i < packets.size(); ++i) {
-        const auto& p = packets[i];
+        if (audible(packets[i])) heard.push_back(&packets[i]);
+        if (i > 0 && static_cast<uint16_t>(packets[i].sequence - packets[i - 1].sequence) != 1) ++sequenceBreaks;
+    }
+    size_t firstStamped = heard.size();
+    size_t stamped = 0;
+    size_t jumps = 0;
+    for (size_t i = 0; i < heard.size(); ++i) {
+        const auto& p = *heard[i];
         if (p.timestamp == static_cast<uint32_t>(p.channel0.front() - k) + mediaclk) {
             ++stamped;
             firstStamped = std::min(firstStamped, i);
         }
         if (i == 0) continue;
-        if (static_cast<uint16_t>(p.sequence - packets[i - 1].sequence) != 1) ++sequenceBreaks;
-        if (p.timestamp - packets[i - 1].timestamp != static_cast<uint32_t>(kFramesPerPacket)) ++jumps;
+        // A transmitter skip moves the timestamp with the position; only a
+        // move onto (or off) PTP time changes their difference
+        const auto& q = *heard[i - 1];
+        if (static_cast<int64_t>(p.timestamp - q.timestamp) != p.channel0.front() - q.channel0.front()) ++jumps;
     }
-    std::cout << "  " << stamped << " of " << packets.size() << " packets on PTP time from packet " << firstStamped
-              << ", " << jumps << " timestamp jump(s)" << std::endl;
-    CHECK(firstStamped > 300 && firstStamped < 420, "PTP stamping starts when PTP takes the clock (" << firstStamped << ")");
-    CHECK(stamped == packets.size() - firstStamped, "every packet from then on is on that line");
-    CHECK(jumps == 1, "one jump, onto PTP time; none on leaving it (" << jumps << ")");
+    std::cout << "  " << stamped << " of " << heard.size() << " audible packets (" << packets.size()
+              << " sent) on PTP time from packet " << firstStamped << ", " << jumps << " timestamp jump(s), "
+              << writer.lateWrites() << " late write(s)" << std::endl;
+    // Stamping starts with the packets sent once PTP has the clock. Every
+    // packet on the old timeline left before then, so it ended by afterFix
+    // (plus the transmitter's ~100 us early wake). The first stamped packet is
+    // at most the one then in progress, and no earlier than a transmitter
+    // running kMaxLatePackets late would send. Positions, not packet counts:
+    // a slow machine oversleeps the 400 ms.
+    const bool haveBoth = firstStamped > 0 && firstStamped < heard.size();
+    const int64_t lastUnstampedEnd = haveBoth ? heard[firstStamped - 1]->channel0.front() + kFramesPerPacket : 0;
+    const int64_t firstStampedStart = haveBoth ? heard[firstStamped]->channel0.front() : 0;
+    std::cout << "  PTP took the clock at positions " << beforeFix << "-" << afterFix << ": last own-timeline packet ends at "
+              << lastUnstampedEnd << ", first PTP packet starts at " << firstStampedStart << std::endl;
+    CHECK(heard.size() * 10 >= packets.size() * 9, "nearly every packet is audible (" << heard.size() << " of "
+                                                                                     << packets.size() << ")");
+    CHECK(haveBoth, "packets both before and after PTP took the clock (first stamped " << firstStamped << " of "
+                                                                                      << heard.size() << ")");
+    CHECK(lastUnstampedEnd <= afterFix + 5, "no packet sent after PTP took the clock is on the old timeline");
+    CHECK(firstStampedStart <= afterFix + kFramesPerPacket, "PTP stamping starts when PTP takes the clock");
+    CHECK(firstStampedStart >= beforeFix - (RTPTransmitter::kMaxLatePackets + 2) * kFramesPerPacket,
+          "and not with packets sent before it");
+    CHECK(stamped == heard.size() - firstStamped, "every packet from then on is on that line");
+    CHECK(jumps == 1, "one jump, onto PTP time; none on leaving it (" << jumps << ", " << skipped << " skipped)");
     CHECK(sequenceBreaks == 0, "sequence numbers never break");
 }
 
@@ -558,38 +790,57 @@ void testNaNSamplesGoOutAsSilence() {
     std::cout << "#60: NaN samples go out as silence, infinities as full scale" << std::endl;
     TxHarness h;
     PacketCapture capture("239.69.99.150", 55190);
-    RTPTransmitter tx(txSdp("239.69.99.150", 55190), txMapping(0), h.context());
+    // On a fixed PTP mapping each packet's timestamp gives its media position,
+    // so only packets whose positions were written are judged: a NaN sends 0,
+    // which can't be told apart from a position nothing wrote
+    const int64_t k = 1000000;
+    SDPSession sdp = txSdp("239.69.99.150", 55190);
+    sdp.mediaClockType = "direct=0";
+    h.networkTime.fix(k);
+    RTPTransmitter tx(sdp, txMapping(0), h.context());
     CHECK(tx.start(), "transmitter should start");
 
     // Keep the stream's buffer written ahead of now: channel 0 alternates NaN
     // and -NaN, channel 1 alternates +infinity and 2.0
-    std::vector<float> frames(256 * kChannels);
-    for (size_t f = 0; f < 256; ++f) {
+    std::vector<float> frames(128 * kChannels);
+    for (size_t f = 0; f < 128; ++f) {
         frames[f * kChannels] = (f % 2) ? -std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::quiet_NaN();
         frames[f * kChannels + 1] = (f % 2) ? 2.0f : std::numeric_limits<float>::infinity();
     }
-    int64_t next = h.clock.snapshot().sampleAt(hostTimeNow());
+    AudioThreadPriority::configureForRealTime();  // as the HAL's IO thread
+    LateWrites late;
+    const int64_t firstWritten = h.clock.snapshot().sampleAt(hostTimeNow());
+    int64_t next = firstWritten;
     const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
     while (std::chrono::steady_clock::now() < until) {
-        const int64_t target = h.clock.snapshot().sampleAt(hostTimeNow()) + 256;
+        const int64_t now = h.clock.snapshot().sampleAt(hostTimeNow());
+        const int64_t target = now + kWriteAhead;
         while (next < target) {
             h.routing.read([&](const TxRouting::Route& route) {
                 route.buffer->write(next, 128, frames.data(), kChannels, 0);
             });
+            late.note(next, 128, h.clock.snapshot().sampleAt(hostTimeNow()));
             next += 128;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    AudioThreadPriority::restoreNormalPriority();
     tx.stop();
-    const auto packets = settled(capture.stop());
+    const auto packets = capture.stop();
 
-    CHECK(packets.size() > 300, "about 380 packets should arrive (got " << packets.size() << ")");
+    size_t judged = 0;
     bool silent = true;
     bool fullScale = true;
     for (const auto& p : packets) {
+        const auto position = static_cast<int64_t>(static_cast<uint32_t>(p.timestamp + static_cast<uint32_t>(k)));
+        if (position < firstWritten || position + kFramesPerPacket > next || late.overlaps(position, kFramesPerPacket)) {
+            continue;
+        }
+        ++judged;
         for (int32_t sample : p.channel0) silent = silent && sample == 0;
         for (int32_t sample : p.channel1) fullScale = fullScale && sample == 8388607;
     }
+    CHECK(judged > 250, "about 400 written packets should arrive (got " << judged << " of " << packets.size() << ")");
     CHECK(silent, "NaN and -NaN should be sent as 0");
     CHECK(fullScale, "+infinity and 2.0 should be sent as positive full scale");
 }

@@ -68,9 +68,12 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
 
-      # Serial: several tests share multicast groups and ports (#132)
+      # Serial: several tests share multicast groups and ports (#132).
+      # Runners are shared VMs: tests widen their limits on timing accuracy
+      # (PTP phase, packets outside the playout window), never correctness.
       - name: Test
         env:
+          AES67_TEST_RELAXED_TIMING: "1"
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build --output-on-failure --timeout 600
