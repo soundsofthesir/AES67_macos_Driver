@@ -455,13 +455,16 @@ void testFollowsTheMediaClockRate() {
     tx.stop();
     const auto packets = settled(capture.stop());
 
-    // Least-squares packets per host second, against the nominal 1000
+    // Least-squares packet times per host second, against the nominal 1000.
+    // Packet times come from the RTP timestamps, not from counting packets:
+    // a transmitter that falls behind on a loaded machine skips packets.
     const double ticksPerSecond = HostTimebase::current().ticksPerSecond();
     double sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
     const double n = static_cast<double>(packets.size());
     for (size_t i = 0; i < packets.size(); ++i) {
         const double x = static_cast<double>(packets[i].arrivalHost - packets.front().arrivalHost) / ticksPerSecond;
-        const double y = static_cast<double>(i);
+        const double y = static_cast<double>(static_cast<uint32_t>(packets[i].timestamp - packets.front().timestamp)) /
+                         kFramesPerPacket;
         sumX += x; sumY += y; sumXX += x * x; sumXY += x * y;
     }
     const double packetsPerSecond = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);

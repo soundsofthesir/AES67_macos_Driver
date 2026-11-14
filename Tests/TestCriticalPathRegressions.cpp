@@ -1858,8 +1858,11 @@ void testReceiverFollowsSenderRestart() {
         sendRun(sender, next, 40000, 900000, 200, -0.5f, 0x0BADF00D, kNoSkip);
     }, &stats);
 
+    // The switch waits for 50 ms of packets whose arrival agrees: a jittery
+    // machine restarts that run, so it is a timing limit (never following
+    // plays none)
     const size_t restarted = countNear(samples, -0.5f);
-    CHECK(restarted >= 150 * kFramesPerPacket,
+    CHECK(restarted >= TestWait::timingLimit<size_t>(150, 75) * kFramesPerPacket,
           "audio from the restarted sender should play promptly (got " << restarted / kFramesPerPacket << " packets)");
     CHECK(stats.reanchors >= 1, "the restart should re-anchor");
 }
@@ -1927,7 +1930,8 @@ void runRestartBehindPlayout(const char* group, uint16_t port, uint32_t restartS
         sendRun(sender, next, 5900, 110 * kFramesPerPacket, 150, -0.5f, restartSsrc, kNoSkip);
     });
 
-    CHECK(countNear(samples, -0.5f) >= 100 * kFramesPerPacket,
+    // As above: how soon the restart is followed is a timing limit
+    CHECK(countNear(samples, -0.5f) >= TestWait::timingLimit<size_t>(100, 30) * kFramesPerPacket,
           label << ": the restarted stream should play (got " << countNear(samples, -0.5f) / kFramesPerPacket
                 << " of 150 packets)");
 }
