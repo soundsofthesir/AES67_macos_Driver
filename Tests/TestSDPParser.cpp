@@ -485,7 +485,7 @@ void testNumericRanges() {
     const std::vector<Accepted> accepted = {
         {"port 65535", with("audio 5004 ", "audio 65535 "), [](const SDPSession& s) { return s.port == 65535; }},
         {"port with a count", with("audio 5004 ", "audio 5004/2 "), [](const SDPSession& s) { return s.port == 5004; }},
-        {"payload type 127", with("RTP/AVP 97", "RTP/AVP 127"), [](const SDPSession& s) { return s.payloadType == 127; }},
+        {"payload type 127", with("RTP/AVP 97\na=rtpmap:97", "RTP/AVP 127\na=rtpmap:127"), [](const SDPSession& s) { return s.payloadType == 127; }},
         {"ttl 255", with("1.1/32", "1.1/255"), [](const SDPSession& s) { return s.ttl == 255; }},
         {"ttl with an address count", with("1.1/32", "1.1/32/3"), [](const SDPSession& s) { return s.ttl == 32; }},
         {"128 channels", with("48000/8", "48000/128"), [](const SDPSession& s) { return s.numChannels == 128; }},
@@ -507,6 +507,176 @@ void testNumericRanges() {
     std::cout << "PASSED\n";
 }
 
+// The defaults (port 5004, L24/48000/2) must not stand in for an m= line or
+// an rtpmap the SDP never gave (#116)
+void testMediaAndRtpmapRequired() {
+    std::cout << "Test: m= and a matching rtpmap are required... ";
+
+    const std::string head = "v=0\n"
+                             "o=- 1 1 IN IP4 10.0.0.5\n"
+                             "s=Required\n"
+                             "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n";
+
+    // No m= at all
+    assert(!SDPParser::parseString(head + "a=rtpmap:96 L24/48000/2\n").has_value());
+
+    // Static PT 11 (L16/44100/1) with no rtpmap: we would play it as L24/48k/2
+    assert(!SDPParser::parseString(head + "m=audio 5004 RTP/AVP 11\n").has_value());
+
+    // An rtpmap for another PT does not describe this stream
+    assert(!SDPParser::parseString(head + "m=audio 5004 RTP/AVP 96\n"
+                                          "a=rtpmap:97 L16/48000/2\n").has_value());
+
+    // Only the rtpmap for the m= PT sets the format, wherever it comes
+    auto matched = SDPParser::parseString(head + "m=audio 5004 RTP/AVP 96\n"
+                                                 "a=rtpmap:97 L16/44100/1\n"
+                                                 "a=rtpmap:96 L24/48000/8\n"
+                                                 "a=rtpmap:98 L16/96000/2\n");
+    assert(matched.has_value());
+    assert(matched->payloadType == 96);
+    assert(matched->encoding == "L24" && matched->sampleRate == 48000 && matched->numChannels == 8);
+
+    std::cout << "PASSED\n";
+}
+
+void testOriginRequired() {
+    std::cout << "Test: o= is required, so a generated SDP parses back... ";
+
+    const std::string body = "s=No origin\n"
+                             "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 96\n"
+                             "a=rtpmap:96 L24/48000/2\n";
+
+    // Found by Tests/Fuzz/FuzzSdpParser: without o= the session has no origin
+    // address, and generate() wrote "o=- <id> 0 IN IP4 " that does not parse
+    assert(!SDPParser::parseString("v=0\n" + body).has_value());
+
+    auto withOrigin = SDPParser::parseString("v=0\no=- 7 1 IN IP4 10.0.0.5\n" + body);
+    assert(withOrigin.has_value());
+    assert(SDPParser::parseString(SDPParser::generate(*withOrigin)).has_value());
+
+    std::cout << "PASSED\n";
+}
+
+void testControlCharactersRejected() {
+    std::cout << "Test: NUL and bare CR inside a line are rejected... ";
+
+    const std::string head = "v=0\n"
+                             "o=- 1 1 IN IP4 10.0.0.5\n";
+    const std::string tail = "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 96\n"
+                             "a=rtpmap:96 L24/48000/2\n";
+
+    // Found by Tests/Fuzz/FuzzSdpParser: a CR or NUL in a field was written
+    // back by generate(), so the SDP announced over SAP did not parse
+    assert(!SDPParser::parseString(head + "s=Bad\rname\n" + tail).has_value());
+    const char nulName[] = "s=Bad\0name\n";
+    assert(!SDPParser::parseString(head + std::string(nulName, sizeof(nulName) - 1) + tail).has_value());
+    assert(!SDPParser::parseString(head + "s=Fine\n" + tail + "a=x-vendor:a\rc=IN IP4 239.1.1.1\n").has_value());
+
+    // A field of only whitespace is no field: an o= line whose username is
+    // a form feed has five fields, not six (also found by fuzzing)
+    assert(!SDPParser::parseString("v=0\no=\f 1 1 IN IP4 10.0.0.5\ns=Fine\n" + tail).has_value());
+
+    // CRLF line endings are still fine
+    assert(SDPParser::parseString("v=0\r\no=- 1 1 IN IP4 10.0.0.5\r\ns=Fine\r\nc=IN IP4 239.69.1.1/32\r\n"
+                                  "t=0 0\r\nm=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n")
+               .has_value());
+
+    std::cout << "PASSED\n";
+}
+
+// ST 2022-7 senders describe the same stream twice, on two networks. We
+// receive the first section; the second's c= and port must not replace it.
+void testOnlyFirstAudioSection() {
+    std::cout << "Test: only the first audio section is used... ";
+
+    auto redundant = SDPParser::parseString(R"(v=0
+o=- 1 1 IN IP4 10.0.0.5
+s=2022-7
+t=0 0
+a=group:DUP primary secondary
+m=audio 5004 RTP/AVP 98
+c=IN IP4 239.69.1.1/32
+a=rtpmap:98 L24/48000/8
+a=ptime:1
+a=mid:primary
+m=audio 5006 RTP/AVP 99
+c=IN IP4 239.70.1.1/16
+a=rtpmap:99 L16/96000/2
+a=ptime:0.125
+a=mid:secondary
+)");
+    assert(redundant.has_value());
+    assert(redundant->connectionAddress == "239.69.1.1" && redundant->ttl == 32);
+    assert(redundant->port == 5004 && redundant->payloadType == 98);
+    assert(redundant->encoding == "L24" && redundant->sampleRate == 48000 && redundant->numChannels == 8);
+    assert(redundant->ptime == 1);
+    assert(redundant->customAttributes["mid"] == "primary");
+
+    // A session-level c= applies to the section; a media-level one overrides it
+    const std::string head = "v=0\n"
+                             "o=- 1 1 IN IP4 10.0.0.5\n"
+                             "s=Levels\n"
+                             "c=IN IP4 239.69.1.1/32\n"
+                             "t=0 0\n";
+    auto sessionLevel = SDPParser::parseString(head + "m=audio 5004 RTP/AVP 96\n"
+                                                      "a=rtpmap:96 L24/48000/2\n"
+                                                      "m=audio 5006 RTP/AVP 96\n"
+                                                      "c=IN IP4 239.70.1.1/32\n"
+                                                      "a=rtpmap:96 L24/48000/2\n");
+    assert(sessionLevel.has_value() && sessionLevel->connectionAddress == "239.69.1.1");
+    auto mediaLevel = SDPParser::parseString(head + "m=audio 5004 RTP/AVP 96\n"
+                                                    "c=IN IP4 239.71.1.1/32\n"
+                                                    "a=rtpmap:96 L24/48000/2\n");
+    assert(mediaLevel.has_value() && mediaLevel->connectionAddress == "239.71.1.1");
+
+    // A non-audio section before the audio one is skipped, with its c= and rtpmap
+    auto videoFirst = SDPParser::parseString(head + "m=video 5010 RTP/AVP 96\n"
+                                                    "c=IN IP4 239.72.1.1/32\n"
+                                                    "a=rtpmap:96 raw/90000\n"
+                                                    "m=audio 5004 RTP/AVP 96\n"
+                                                    "a=rtpmap:96 L24/48000/2\n");
+    assert(videoFirst.has_value());
+    assert(videoFirst->connectionAddress == "239.69.1.1" && videoFirst->port == 5004);
+    assert(videoFirst->mediaType == "audio" && videoFirst->encoding == "L24");
+
+    std::cout << "PASSED\n";
+}
+
+// Some senders put two spaces between fields; that is not a reason to drop
+// the stream (#116)
+void testRepeatedSpaces() {
+    std::cout << "Test: repeated spaces between fields... ";
+
+    auto session = SDPParser::parseString("v=0\n"
+                                          "o=-  1729346400 0  IN IP4  192.168.1.100\n"
+                                          "s=Spaces\n"
+                                          "c=IN  IP4 239.69.1.1/32\n"
+                                          "t=0  0\n"
+                                          "m=audio  5004 RTP/AVP  96\n"
+                                          "a=rtpmap:96  L24/48000/8\n");
+    assert(session.has_value());
+    assert(session->sessionID == 1729346400 && session->originAddress == "192.168.1.100");
+    assert(session->connectionAddress == "239.69.1.1");
+    assert(session->port == 5004 && session->transport == "RTP/AVP" && session->payloadType == 96);
+    assert(session->encoding == "L24" && session->numChannels == 8);
+
+    // Empty fields between slashes are still an error
+    assert(!SDPParser::parseString("v=0\n"
+                                   "o=- 1 1 IN IP4 10.0.0.5\n"
+                                   "s=Slashes\n"
+                                   "c=IN IP4 239.69.1.1/32\n"
+                                   "t=0 0\n"
+                                   "m=audio 5004 RTP/AVP 96\n"
+                                   "a=rtpmap:96 L24//8\n").has_value());
+
+    std::cout << "PASSED\n";
+}
+
 void runAllTests() {
     std::cout << "\n=== AES67 SDP Parser Test Suite ===\n\n";
 
@@ -522,6 +692,11 @@ void runAllTests() {
     testRtpmapWithoutChannelCount();
     testPacketTimingValidation();
     testNumericRanges();
+    testMediaAndRtpmapRequired();
+    testOriginRequired();
+    testControlCharactersRejected();
+    testOnlyFirstAudioSection();
+    testRepeatedSpaces();
     testInvalidSDP();
     testFileOperations();
 

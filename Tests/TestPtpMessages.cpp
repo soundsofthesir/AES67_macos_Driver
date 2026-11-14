@@ -56,6 +56,14 @@ std::vector<uint8_t> wingTimestamp(uint32_t nanoseconds) {
             static_cast<uint8_t>(nanoseconds)};
 }
 
+// a 48-bit seconds field and nanoseconds, big-endian
+std::vector<uint8_t> timestamp(uint64_t seconds, uint32_t nanoseconds) {
+    std::vector<uint8_t> t;
+    for (int shift = 40; shift >= 0; shift -= 8) t.push_back(static_cast<uint8_t>(seconds >> shift));
+    for (int shift = 24; shift >= 0; shift -= 8) t.push_back(static_cast<uint8_t>(nanoseconds >> shift));
+    return t;
+}
+
 std::vector<uint8_t> concat(std::vector<uint8_t> a, const std::vector<uint8_t>& b) {
     a.insert(a.end(), b.begin(), b.end());
     return a;
@@ -159,6 +167,22 @@ void testRejectsBadPackets() {
         auto announce = concat(header(0x0B, 64, 0, 0, kZeroCorrection, 1, 0x05, 0x01), wingTimestamp(nanoseconds));
         announce.insert(announce.end(), 20, 0x00);
         CHECK(!parse(announce.data(), announce.size()).has_value(), "an Announce with nanoseconds " << nanoseconds);
+    }
+
+    // seconds past 2^34 (year ~2514) would overflow totalNanoseconds() further on
+    for (uint64_t seconds : {(1ULL << 34) + 1, 0xFFFFFFFFFFFFULL}) {
+        const auto sync = concat(header(0x00, 44, 0x02, 0x00, kZeroCorrection, 1, 0x00, 0xFD), timestamp(seconds, 0));
+        CHECK(!parse(sync.data(), sync.size()).has_value(), "a Sync with seconds " << seconds);
+        const auto followUp = concat(header(0x08, 44, 0, 0, kZeroCorrection, 1, 0x02, 0xFD), timestamp(seconds, 0));
+        CHECK(!parse(followUp.data(), followUp.size()).has_value(), "a Follow_Up with seconds " << seconds);
+    }
+    for (uint64_t seconds : {1ULL << 34, 1700000000ULL}) {
+        const auto followUp =
+            concat(header(0x08, 44, 0, 0, kZeroCorrection, 1, 0x02, 0xFD), timestamp(seconds, 999999999));
+        const auto m = parse(followUp.data(), followUp.size());
+        CHECK(m && m->timestamp.seconds == seconds, "a Follow_Up with seconds " << seconds);
+        CHECK(m && m->timestamp.totalNanoseconds() == seconds * 1000000000ULL + 999999999ULL,
+              "seconds " << seconds << " in nanoseconds");
     }
 
     // Message types we do not decode still parse their header (so a slave
