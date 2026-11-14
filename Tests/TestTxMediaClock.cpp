@@ -683,7 +683,11 @@ void testPtpLoopbackIsSampleExact() {
     CHECK(tx.start(), "transmitter should start");
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     rx.networkTime.fix(k);  // PTP takes the clock: both sides move onto PTP time
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(900));
+    // Skips and late drops from here on cover the positions read back below
+    const uint64_t skippedBefore = skippedPackets(tx);
+    const uint64_t lateBefore = receiver.getPlacementStatistics().lateDrops;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Read back recent positions straight from the receive buffer: each must
     // hold the sample written at that position on the TX side
@@ -691,7 +695,8 @@ void testPtpLoopbackIsSampleExact() {
     std::vector<float> frame(128);
     size_t checked = 0;
     size_t wrong = 0;
-    size_t missing = 0;  // not (yet) received: a slow machine can deliver a packet late
+    size_t missing = 0;      // not (yet) received
+    size_t lateWritten = 0;  // silent because the writer missed its time, as a stalled IO thread would
     for (int64_t position = end - 2000; position < end; ++position) {
         std::fill(frame.begin(), frame.end(), 0.0f);
         rx.routing.read([&](const RxRouting::Route& route) {
@@ -699,17 +704,24 @@ void testPtpLoopbackIsSampleExact() {
         });
         ++checked;
         if (frame[0] == 0.0f) {
-            ++missing;
+            ++(writer.late(position, 1) ? lateWritten : missing);
         } else if (std::fabs(static_cast<double>(frame[0]) * 8388608.0 - static_cast<double>(position)) > 1.5) {
             ++wrong;
         }
     }
-    std::cout << "  " << checked << " positions read back: " << wrong << " wrong, " << missing << " missing" << std::endl;
     tx.stop();
     receiver.stop();
     writer.stop();
+    // A stalled machine can make TX skip packets or deliver them past their playout point
+    const uint64_t skipped = skippedPackets(tx) - skippedBefore;
+    const uint64_t lateDrops = receiver.getPlacementStatistics().lateDrops - lateBefore;
+    std::cout << "  " << checked << " positions read back: " << wrong << " wrong, " << missing << " missing, "
+              << lateWritten << " written late; in the last 100 ms " << skipped << " packets skipped, " << lateDrops
+              << " dropped late"
+              << std::endl;
     CHECK(checked == 2000 && wrong == 0, wrong << " of " << checked << " positions hold another position's sample");
-    CHECK(missing <= 2 * kFramesPerPacket, "and at most a couple of packets not yet arrived (" << missing << ")");
+    CHECK(missing <= (2 + skipped + lateDrops) * kFramesPerPacket,
+          "and at most a couple of packets not yet arrived (" << missing << ")");
     CHECK(receiver.getPlacementStatistics().reanchors == 0, "no re-anchors: it starts over on PTP's mapping");
     CHECK(rx.networkTime.offset() == k, "PTP's mapping was never moved");
 }

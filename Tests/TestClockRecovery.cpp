@@ -296,6 +296,8 @@ struct LoopbackRun {
     double meanRatio{1.0};  // rate the clock actually ran at over the last 3 s
     size_t heard{0};
     size_t gaps{0};
+    uint32_t lateSends{0};
+    double maxBehindMs{0.0};
 };
 
 LoopbackRun receiveDriftingSender(const char* group, uint16_t port, double senderPpm, double seconds, bool recover) {
@@ -341,14 +343,14 @@ LoopbackRun receiveDriftingSender(const char* group, uint16_t port, double sende
         const MediaPosition p = harness.clock.snapshot().positionAt(host);
         return static_cast<double>(p.sample) + p.fraction;
     };
-    auto next = std::chrono::steady_clock::now();
+    SendPacer pacer(period);
     for (uint32_t i = 0; i < packets; ++i) {
         if (i == measureFrom) {
             measureHost = hostTimeNow();
             measurePosition = positionNow(measureHost);
         }
         sender.sendL24(static_cast<uint16_t>(i), i * kFramesPerPacket, 2, 0.5f);
-        std::this_thread::sleep_until(next += period);
+        pacer.wait();
     }
     const uint64_t endHost = hostTimeNow();
     const double elapsedSeconds = static_cast<double>(endHost - measureHost) / HostTimebase::current().ticksPerSecond();
@@ -362,6 +364,8 @@ LoopbackRun receiveDriftingSender(const char* group, uint16_t port, double sende
     run.meanRatio = (positionNow(endHost) - measurePosition) / (kSampleRate * elapsedSeconds);
     run.heard = region.size();
     run.gaps = region.size() - countNonSilent(region);
+    run.lateSends = pacer.lateSends();
+    run.maxBehindMs = pacer.maxBehindMs();
     CHECK(recovery.reference() == nullptr, "a stopped receiver should release the reference");
     return run;
 }
@@ -378,11 +382,12 @@ void testLoopbackDriftingSender() {
     const LoopbackRun recovered = receiveDriftingSender("239.69.99.31", 55062, kPpm, 8.0, true);
     std::cout << recovered.stats.reanchors << " re-anchors, " << recovered.gaps << " silent samples, mean rate "
               << (recovered.meanRatio - 1.0) * 1e6 << " ppm, " << recovered.stats.lateDrops << " late, "
-              << recovered.stats.earlyDrops << " early" << std::endl;
+              << recovered.stats.earlyDrops << " early, " << recovered.lateSends << " sent late (worst "
+              << recovered.maxBehindMs << " ms behind)" << std::endl;
     CHECK(recovered.stats.reanchors == 0, "recovered: no re-anchors (got " << recovered.stats.reanchors << ")");
-    // Scheduling on a loaded CI runner delays some packets past the window
-    const uint64_t outsideLimit = TestWait::timingLimit<uint64_t>(2, 20);
-    const size_t gapLimit = TestWait::timingLimit<size_t>(2, 10) * kFramesPerPacket;
+    // A loaded machine can stall the sender: what it sent late may miss the window
+    const uint64_t outsideLimit = 2 + recovered.lateSends;
+    const size_t gapLimit = outsideLimit * kFramesPerPacket;
     CHECK(recovered.stats.lateDrops + recovered.stats.earlyDrops <= outsideLimit,
           "recovered: no packets outside the window (late " << recovered.stats.lateDrops << ", early "
                                                             << recovered.stats.earlyDrops << ")");
