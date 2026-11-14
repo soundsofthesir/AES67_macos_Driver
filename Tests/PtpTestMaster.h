@@ -6,10 +6,14 @@
 // Delay_Req by multicast or unicast. Test ports and TTL 0, so nothing
 // reaches the network.
 //
-// Two-step, its Follow_Up carries the kernel's time for its own copy of
-// the Sync on lo0, as a master's hardware stamps the time a Sync leaves.
-// The kernel stamps each socket's copy as it delivers it, so a receiver's
-// copy is stamped 0 to ~35 us earlier: a steady error. A time read before
+// Two-step, its Follow_Up carries the kernel's time for the earlier of two
+// copies of the Sync on lo0 (its own and a witness socket's), as a
+// master's hardware stamps the time a Sync leaves. The kernel stamps each
+// socket's copy as it delivers it, usually within ~35 us of a receiver's
+// copy. A shared CI runner sometimes delivers one copy hundreds of us
+// late, and a t1 that late lies above the master's true line, where the
+// receiver's upper-envelope fit rests on it (+624 us, +46 ppm seen):
+// two copies make that far less likely. A time read before
 // sending would include the send call itself, which takes 40 to 300 us
 // depending on how fast the CPU is running, and Syncs whose fastest delay
 // moves like that defeat the servo's lock test.
@@ -97,9 +101,9 @@ public:
     uint64_t multicastDelayRequests() const { return multicastRequests_.load(); }
     uint64_t unicastDelayRequests() const { return unicastRequests_.load(); }
 
-    /// For a failed test: how each Sync's t1 compares with the kernel time
-    /// a receiver's copy got. t1 later than that puts the Sync above the
-    /// master's true line, where the servo's upper-envelope fit rests on it.
+    /// For a failed test: how far apart the kernel put the two copies of
+    /// each Sync. The Follow_Up carries the earlier; the gap shows how late
+    /// one copy can be delivered, which would have put t1 above the line.
     std::string syncReport() const {
         std::lock_guard<std::mutex> lock(recordsMutex_);
         std::vector<int64_t> sendCall, ownMinusWitness;
@@ -109,11 +113,9 @@ public:
         const uint64_t start = records_.empty() ? 0 : records_.front().preNs;
         for (const auto& r : records_) {
             sendCall.push_back(static_cast<int64_t>(r.postNs - r.preNs));
-            if (r.ownNs == 0) ++fallback;
-            if (r.witnessNs == 0) { ++noWitness; continue; }
-            // t1 as sent, in host time: the own copy's stamp, or the time read before sending
-            const uint64_t t1Host = r.ownNs != 0 ? r.ownNs : r.preNs;
-            const int64_t ahead = static_cast<int64_t>(t1Host - r.witnessNs);
+            if (r.ownNs == 0 && r.witnessNs == 0) ++fallback;
+            if (r.ownNs == 0 || r.witnessNs == 0) { ++noWitness; continue; }
+            const int64_t ahead = static_cast<int64_t>(r.ownNs - r.witnessNs);
             ownMinusWitness.push_back(ahead);
             outliers.push_back({ahead, static_cast<double>(r.preNs - start) / 1e9, r.seq});
         }
@@ -128,10 +130,12 @@ public:
         std::sort(outliers.begin(), outliers.end(), [](const Outlier& a, const Outlier& b) { return a.ahead > b.ahead; });
         std::ostringstream o;
         o << "  master: " << records_.size() << " Syncs, " << fallback << " Follow_Ups with the time read before sending, "
-          << noWitness << " with no witness copy\n"
+          << noWitness << " with a copy missing\n"
           << "  send call: " << summary(sendCall) << "\n"
-          << "  t1 minus a receiver copy's kernel time (positive: above the true line): " << summary(ownMinusWitness) << "\n"
-          << "  furthest above:";
+          << "  own copy minus witness copy: " << summary(ownMinusWitness) << "\n"
+          << "  furthest apart:";
+        std::sort(outliers.begin(), outliers.end(),
+                  [](const Outlier& a, const Outlier& b) { return std::llabs(a.ahead) > std::llabs(b.ahead); });
         for (size_t i = 0; i < outliers.size() && i < 8; ++i) {
             o << " " << outliers[i].ahead / 1000.0 << " us at " << outliers[i].atSeconds << " s (seq " << outliers[i].seq << ");";
         }
@@ -156,7 +160,7 @@ private:
             // The Follow_Up goes when the Sync comes back on lo0, with the
             // kernel's time for it (or this one, should it not come back)
             sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, true, Timestamp{}));
-            pendingFollowUp_ = PendingFollowUp{seq, t1, hostNanos()};
+            pendingFollowUp_ = PendingFollowUp{seq, t1, hostNanos(), 0, 0};
         } else {
             sendGroup(s_.eventPort, buildSync(identity_, 0, seq, s_.logSyncInterval, false, originOf(t1), scaledCorrection()));
         }
@@ -169,12 +173,17 @@ private:
         pendingFollowUp_.reset();
     }
 
-    void onOwnSync(const Message& m, uint64_t ticks) {
-        if (pendingFollowUp_ && ticks != 0 && m.header.type == MessageType::Sync &&
-            m.header.sequenceId == pendingFollowUp_->sequence) {
-            const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
-            note(m.header.sequenceId, [ns](SyncRecord& r) { r.ownNs = ns; });
-            sendFollowUp(pendingFollowUp_->sequence, clockAt(HostTimebase::current().ticksToNanos(ticks)));
+    // A copy of a Sync came back: its own (the master's event socket) or
+    // the witness's. The Follow_Up goes once both have, with the earlier time.
+    void onSyncCopy(const Message& m, uint64_t ticks, bool own) {
+        if (ticks == 0 || m.header.type != MessageType::Sync) return;
+        const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
+        note(m.header.sequenceId, [ns, own](SyncRecord& r) { (own ? r.ownNs : r.witnessNs) = ns; });
+        if (!pendingFollowUp_ || m.header.sequenceId != pendingFollowUp_->sequence) return;
+        auto& copy = own ? pendingFollowUp_->ownNs : pendingFollowUp_->witnessNs;
+        copy = ns;
+        if (pendingFollowUp_->ownNs != 0 && pendingFollowUp_->witnessNs != 0) {
+            sendFollowUp(pendingFollowUp_->sequence, clockAt(std::min(pendingFollowUp_->ownNs, pendingFollowUp_->witnessNs)));
         }
     }
 
@@ -185,10 +194,7 @@ private:
         long n;
         while ((n = witness_.receive(buffer, sizeof(buffer), ticks, source)) > 0) {
             const auto m = parse(buffer, static_cast<size_t>(n));
-            if (m && ticks != 0 && m->header.type == MessageType::Sync && m->header.source.clock == identity_.clock) {
-                const uint64_t ns = HostTimebase::current().ticksToNanos(ticks);
-                note(m->header.sequenceId, [ns](SyncRecord& r) { r.witnessNs = ns; });
-            }
+            if (m && m->header.source.clock == identity_.clock) onSyncCopy(*m, ticks, false);
         }
     }
 
@@ -230,7 +236,7 @@ private:
         long n;
         while ((n = socket.receive(buffer, sizeof(buffer), ticks, source)) > 0) {
             const auto m = parse(buffer, static_cast<size_t>(n));
-            if (m && m->header.source.clock == identity_.clock) onOwnSync(*m, ticks);
+            if (m && m->header.source.clock == identity_.clock) onSyncCopy(*m, ticks, true);
             if (!m || m->header.type != MessageType::DelayReq || m->header.source.clock == identity_.clock) continue;
             (unicast ? unicastRequests_ : multicastRequests_).fetch_add(1);
             const uint64_t t4 = clockAt(HostTimebase::current().ticksToNanos(ticks));
@@ -264,7 +270,11 @@ private:
             readEventPort(unicastEvent_, true);
             readWitness();
             if (pendingFollowUp_ && hostNanos() - pendingFollowUp_->sentNs > kOwnSyncWaitNs) {
-                sendFollowUp(pendingFollowUp_->sequence, pendingFollowUp_->fallbackT1);
+                // A copy never came back: the one that did, or the time read before sending
+                const uint64_t own = pendingFollowUp_->ownNs, witness = pendingFollowUp_->witnessNs;
+                sendFollowUp(pendingFollowUp_->sequence,
+                             own || witness ? clockAt(std::min(own ? own : witness, witness ? witness : own))
+                                            : pendingFollowUp_->fallbackT1);
             }
         }
     }
@@ -273,6 +283,8 @@ private:
         uint16_t sequence;
         uint64_t fallbackT1;  // master time read before sending
         uint64_t sentNs;
+        uint64_t ownNs{0};      // kernel times of the copies back so far
+        uint64_t witnessNs{0};
     };
     static constexpr uint64_t kOwnSyncWaitNs = 10000000;  // 10 ms
 
