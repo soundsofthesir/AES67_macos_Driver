@@ -239,12 +239,13 @@ bool AES67Device::IsSupportedSampleRate(Float64 sampleRate) {
 }
 
 OSStatus AES67Device::SetNominalSampleRateImpl(Float64 rate) {
-    return RunHalCallback("SetNominalSampleRateImpl", [this, rate]() -> OSStatus {
+    const Float64 previousRate = currentSampleRate_.load();
+    bool accepted = false;  // StreamManager took the new rate: undo everything on failure
+
+    const OSStatus status = RunHalCallback("SetNominalSampleRate", [&]() -> OSStatus {
         if (!IsSupportedSampleRate(rate)) {
             return kAudioHardwareUnsupportedOperationError;
         }
-
-        const Float64 previousRate = currentSampleRate_.load();
         AES67_LOGF("SetNominalSampleRateImpl: Changing from %.0f Hz to %.0f Hz", previousRate, rate);
 
         // StreamManager refuses rates its active streams cannot deliver (no SRC yet)
@@ -252,36 +253,50 @@ OSStatus AES67Device::SetNominalSampleRateImpl(Float64 rate) {
             AES67_LOGF("SetNominalSampleRateImpl: Refused %.0f Hz - active streams run at a different rate", rate);
             return kAudioDeviceUnsupportedFormatError;
         }
+        accepted = true;
 
-        const OSStatus status = aspl::Device::SetNominalSampleRateImpl(rate);
-        if (status != kAudioHardwareNoError) {
-            if (streamManager_) {
-                streamManager_->setDeviceSampleRate(previousRate);
-            }
-            return status;
+        const OSStatus baseStatus = aspl::Device::SetNominalSampleRateImpl(rate);
+        if (baseStatus != kAudioHardwareNoError) {
+            return baseStatus;
         }
-
-        currentSampleRate_.store(rate);
-        linkOffsetFrames_.store(LinkOffsetFramesFor(rate));
-        if (inputStream_) {
-            inputStream_->SetLatencyAsync(static_cast<UInt32>(linkOffsetFrames_.load()));
-        }
-
-        // Media positions are counted in samples, so a new rate is a new timeline
-        RestartTimeline(rate);
-
-        // Streams must present the same rate as the device. We are inside a HAL
-        // configuration change, so these Async setters apply in place.
-        if (inputStream_) {
-            ApplyStreamSampleRate(*inputStream_, rate);
-        }
-        if (outputStream_) {
-            ApplyStreamSampleRate(*outputStream_, rate);
-        }
-
+        ApplySampleRate(rate);
         AES67_LOGF("SetNominalSampleRateImpl: Now running at %.0f Hz", rate);
         return kAudioHardwareNoError;
     });
+
+    if (status != kAudioHardwareNoError && accepted) {
+        // Failed or threw part way: put the driver, StreamManager and stream
+        // formats back on the old rate, so they agree with what the HAL keeps
+        RunHalCallback("SetNominalSampleRate rollback", [&]() -> OSStatus {
+            if (streamManager_) {
+                streamManager_->setDeviceSampleRate(previousRate);
+            }
+            aspl::Device::SetNominalSampleRateImpl(previousRate);
+            ApplySampleRate(previousRate);
+            return kAudioHardwareNoError;
+        });
+    }
+    return status;
+}
+
+void AES67Device::ApplySampleRate(Float64 rate) {
+    currentSampleRate_.store(rate);
+    linkOffsetFrames_.store(LinkOffsetFramesFor(rate));
+    if (inputStream_) {
+        inputStream_->SetLatencyAsync(static_cast<UInt32>(linkOffsetFrames_.load()));
+    }
+
+    // Media positions are counted in samples, so a new rate is a new timeline
+    RestartTimeline(rate);
+
+    // Streams must present the same rate as the device. We are inside a HAL
+    // configuration change, so these Async setters apply in place.
+    if (inputStream_) {
+        ApplyStreamSampleRate(*inputStream_, rate);
+    }
+    if (outputStream_) {
+        ApplyStreamSampleRate(*outputStream_, rate);
+    }
 }
 
 void AES67Device::RestartTimeline(Float64 sampleRate) {
@@ -460,12 +475,13 @@ std::string AES67Device::GetDeviceUID() const {
 
 OSStatus AES67Device::StartIOImpl(UInt32 clientID, UInt32 startCount) {
     // startCount == 0 means first client starting IO (device transitions to running)
-    if (startCount == 0) {
-        try {
-            // Stream activity is left to the HAL, which activates the streams
-            // its clients use. Setting it here would send a property-change
+    const OSStatus status = RunHalCallback("StartIO", [&]() -> OSStatus {
+        if (startCount == 0) {
+            // Stream activity is left to the HAL, which activates the streams its
+            // clients use. Setting it here would send a property-change
             // notification affecting IO, which AudioServerPlugIn.h forbids.
-            //
+            ioRunning_.store(true);
+
             // New timeline for this IO session (new seed for the HAL)
             RestartTimeline(currentSampleRate_.load());
 
@@ -473,46 +489,20 @@ OSStatus AES67Device::StartIOImpl(UInt32 clientID, UInt32 startCount) {
             if (streamManager_) {
                 streamManager_->setIOActive(true);
             }
-            ioRunning_.store(true);
-        } catch (const std::exception& e) {
-            LogHalError("StartIO: network start failed", e.what());
-            ioRunning_.store(false);
-            try {
-                if (streamManager_) streamManager_->setIOActive(false);
-            } catch (...) {
-                LogHalError("StartIO: rollback failed");
-            }
-            return kAudioHardwareUnspecifiedError;
-        } catch (...) {
-            LogHalError("StartIO: network start failed", "unknown exception");
-            ioRunning_.store(false);
-            try {
-                if (streamManager_) streamManager_->setIOActive(false);
-            } catch (...) {
-                LogHalError("StartIO: rollback failed");
-            }
-            return kAudioHardwareUnspecifiedError;
         }
-    }
-
-    OSStatus status = kAudioHardwareUnspecifiedError;
-    try {
-        status = aspl::Device::StartIOImpl(clientID, startCount);
-    } catch (const std::exception& e) {
-        LogHalError("StartIO: base StartIO threw", e.what());
-    } catch (...) {
-        LogHalError("StartIO: base StartIO threw", "unknown exception");
-    }
+        return aspl::Device::StartIOImpl(clientID, startCount);
+    });
 
     if (status != kAudioHardwareNoError && startCount == 0) {
-        // The HAL does not call StopIO after a failed StartIO: do not leave
-        // the network side running.
+        // The HAL does not call StopIO after a failed StartIO: stop the network
+        // side here, or the next StartIO finds it active and starts nothing
         ioRunning_.store(false);
-        try {
-            if (streamManager_) streamManager_->setIOActive(false);
-        } catch (...) {
-            LogHalError("StartIO: rollback after base failure");
-        }
+        RunHalCallback("StartIO rollback", [this]() -> OSStatus {
+            if (streamManager_) {
+                streamManager_->setIOActive(false);
+            }
+            return kAudioHardwareNoError;
+        });
     }
     return status;
 }
@@ -520,30 +510,19 @@ OSStatus AES67Device::StartIOImpl(UInt32 clientID, UInt32 startCount) {
 OSStatus AES67Device::StopIOImpl(UInt32 clientID, UInt32 startCount) {
     // startCount == 0 means last client stopped IO (device transitions to not running)
     if (startCount == 0) {
-        // Stop RTP network threads — no client needs audio anymore. Let the
-        // HAL's base stop run even if a receiver/transmitter refuses to stop,
-        // otherwise the device stays "running" with everything stopped (#123).
-        try {
+        // Stop RTP network threads, no client needs audio anymore. The base
+        // stop below runs even if this fails, or the HAL keeps the device
+        // running with its streams stopped (#123).
+        RunHalCallback("StopIO network stop", [this]() -> OSStatus {
             if (streamManager_) {
                 streamManager_->setIOActive(false);
             }
-        } catch (const std::exception& e) {
-            LogHalError("StopIO: network stop failed", e.what());
-        } catch (...) {
-            LogHalError("StopIO: network stop failed", "unknown exception");
-        }
-
+            return kAudioHardwareNoError;
+        });
         ioRunning_.store(false);
     }
 
-    try {
-        return aspl::Device::StopIOImpl(clientID, startCount);
-    } catch (const std::exception& e) {
-        LogHalError("StopIO: base StopIO threw", e.what());
-    } catch (...) {
-        LogHalError("StopIO: base StopIO threw", "unknown exception");
-    }
-    return kAudioHardwareUnspecifiedError;
+    return RunHalCallback("StopIO", [&] { return aspl::Device::StopIOImpl(clientID, startCount); });
 }
 
 void AES67Device::ResetStatistics() {
