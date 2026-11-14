@@ -1724,6 +1724,102 @@ void testPacketsMustMatchTheStream() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #144: a packet the stream cannot use must not become the timestamp
+// reference. Before the fix, one header-only (or wrong-PT half-size) packet
+// latched its frame count, and the next valid packet was dropped for a
+// timestamp step that never happened. One forged packet per real packet
+// therefore denied the stream 1:1.
+// ---------------------------------------------------------------------------
+void testRejectedPacketDoesNotDropTheNext() {
+    std::cout << "#144: a rejected packet does not drop the next valid packet" << std::endl;
+
+    struct BadPacket {
+        const char* what;
+        const char* group;
+        uint16_t port;
+        bool headerOnly;  // else: wrong payload type, half a packet of payload
+    };
+    const BadPacket cases[] = {
+        {"header-only packet", "239.69.99.200", 55300, true},
+        {"wrong payload type, 24 frames", "239.69.99.201", 55302, false},
+    };
+
+    for (const auto& c : cases) {
+        RxHarness harness;
+        RTPReceiver receiver(makeRxSDP(c.group, c.port, 2), makeMapping(2, 0), harness.context());
+        CHECK(receiver.start(), c.what << ": receiver should start");
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        LoopbackSender sender(c.group, c.port);
+
+        auto next = std::chrono::steady_clock::now();
+        sendRun(sender, next, 1000, 0, 10, 0.25f, 0x12345678, kNoSkip);
+
+        // Same SSRC and the sequence number the real sender would use next, so
+        // the old code bridged the gap and checked the following packet against
+        // this one's bogus frame count.
+        if (c.headerOnly) {
+            uint8_t packet[12] = {0x80, kPayloadTypeL24, 0x03, 0xF2,  // seq 1010, ts 480
+                                  0x00, 0x00, 0x01, 0xE0,
+                                  0x12, 0x34, 0x56, 0x78};
+            sender.sendRaw(packet, sizeof(packet));
+        } else {
+            // PT 96 with 24 frames of 2 channels: structurally wrong for a
+            // PT 97 stream expecting 48 frames.
+            std::vector<uint8_t> packet(12 + 24 * 2 * 3, 0);
+            packet[0] = 0x80;
+            packet[1] = 96;
+            packet[2] = 0x03;
+            packet[3] = 0xF2;
+            packet[4] = 0x00; packet[5] = 0x00; packet[6] = 0x01; packet[7] = 0xE0;
+            packet[8] = 0x12; packet[9] = 0x34; packet[10] = 0x56; packet[11] = 0x78;
+            sender.sendRaw(packet.data(), packet.size());
+        }
+        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+
+        sendRun(sender, next, 1011, 11 * kFramesPerPacket, 10, 0.25f, 0x12345678, kNoSkip);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto stats = receiver.getStatistics();
+        receiver.stop();
+
+        CHECK(stats.packetsReceived == 20,
+              c.what << ": all 20 valid packets should be accepted (got " << stats.packetsReceived << ")");
+        CHECK(stats.malformedPackets == 1,
+              c.what << ": only the injected packet should count as malformed (got " << stats.malformedPackets << ")");
+    }
+}
+
+// The other half of #144: a structurally valid packet whose timestamp does not
+// step correctly is still dropped, but must become the reference so the next
+// packet can resume. Latching only accepted packets would lock the stream out.
+void testTimestampStepResyncsAfterOnePacket() {
+    std::cout << "#144: a timestamp step costs one packet, then the stream resumes" << std::endl;
+
+    RxHarness harness;
+    RTPReceiver receiver(makeRxSDP("239.69.99.202", 55304, 2), makeMapping(2, 0), harness.context());
+    CHECK(receiver.start(), "receiver should start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    LoopbackSender sender("239.69.99.202", 55304);
+
+    auto next = std::chrono::steady_clock::now();
+    sendRun(sender, next, 2000, 0, 10, 0.25f, 0x12345678, kNoSkip);
+    // Contiguous sequence, timestamp jumps by 1000 frames: valid RTP, wrong
+    // place on the timeline.
+    sender.sendL24(2010, 1432, 2, 0.5f, 0x12345678);
+    std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+    sendRun(sender, next, 2011, 1480, 10, 0.25f, 0x12345678, kNoSkip);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto stats = receiver.getStatistics();
+    receiver.stop();
+
+    CHECK(stats.packetsReceived == 20,
+          "20 packets should be accepted (got " << stats.packetsReceived << ")");
+    CHECK(stats.malformedPackets == 1,
+          "only the timestamp-step packet should be dropped (got " << stats.malformedPackets << ")");
+}
+
 void testReceiverFollowsSenderRestart() {
     std::cout << "RX follows a sender restart" << std::endl;
 
@@ -2050,6 +2146,8 @@ int main() {
     testChannelMapIsIgnored();
     testTxStreamSurvivesReload();
     testPacketsMustMatchTheStream();
+    testRejectedPacketDoesNotDropTheNext();
+    testTimestampStepResyncsAfterOnePacket();
     testReceiverFollowsSenderRestart();
     testLostPacketKeepsTimeline();
     testLatePacketIsIgnored();
