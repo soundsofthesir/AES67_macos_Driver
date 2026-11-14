@@ -67,27 +67,20 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
 
-      # TEMPORARY probe: which way of running gets past Local Network privacy
-      - name: Probe multicast
-        continue-on-error: true
-        run: |
-          T="$PWD/build/Tests/TestIntegrationAudioPath"
-          echo "== plain"; "$T" 2>&1 | grep -E "FAIL|Passed|Failed" | head -5 || true
-          echo "== sudo"; sudo -E "$T" 2>&1 | grep -E "FAIL|Passed|Failed" | head -5 || true
-          echo "== launchd daemon"
-          sudo launchctl submit -l ci.probe -o /tmp/probe.out -e /tmp/probe.out -- "$T"
-          sleep 8; sudo launchctl remove ci.probe || true
-          grep -E "FAIL|Passed|Failed" /tmp/probe.out | head -5 || true
-
       # Serial: several tests share multicast groups and ports (#132).
       # Runners are shared VMs: tests widen their limits on timing accuracy
       # (PTP phase, packets outside the playout window), never correctness.
+      # As root: since macOS 15, Local Network privacy blocks multicast for a
+      # process nobody can grant it to, which is what the runner's agent
+      # starts. Programs running as root are allowed it (Apple TN3179).
       - name: Test
         env:
           AES67_TEST_RELAXED_TIMING: "1"
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build --output-on-failure --timeout 600
+        run: >
+          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,ASAN_OPTIONS,UBSAN_OPTIONS,HOME
+          "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
 
   linux-portable:
     # The tests that don't need Core Audio or macOS socket options, under
