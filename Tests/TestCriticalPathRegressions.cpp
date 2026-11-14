@@ -196,27 +196,50 @@ std::vector<float> receiveAndListen(const char* group, uint16_t port, SendFn sen
     return samples;
 }
 
-// Sends `count` packets of `value` at 1 ms pacing, skipping indices for which skip(i) is true.
-template<typename SkipFn>
-void sendRun(LoopbackSender& sender, std::chrono::steady_clock::time_point& next, uint16_t firstSeq,
-             uint32_t firstTimestamp, uint16_t count, float value, uint32_t ssrc, SkipFn skip) {
+const auto kNoSkip = [](uint16_t) { return false; };
+
+// Sends `count` packets of `value`, paced by `pacer`, skipping indices for
+// which skip(i) is true. The pacer's schedule starts after the first send, so
+// a stall before it only delays the run; later stalls count as late sends.
+template<typename SkipFn = decltype(kNoSkip)>
+void sendRun(LoopbackSender& sender, SendPacer& pacer, uint16_t firstSeq, uint32_t firstTimestamp, uint16_t count,
+             float value, uint32_t ssrc, SkipFn skip = kNoSkip) {
     for (uint16_t i = 0; i < count; ++i) {
         if (!skip(i)) {
             sender.sendL24(static_cast<uint16_t>(firstSeq + i), firstTimestamp + i * kFramesPerPacket, 2, value, ssrc);
         }
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
 }
 
-const auto kNoSkip = [](uint16_t) { return false; };
+// Placement drops and the sends the machine delayed, for failure messages
+std::string dropSummary(const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer) {
+    std::ostringstream out;
+    out << "late drops " << stats.lateDrops << ", early drops " << stats.earlyDrops << ", " << pacer.lateSends()
+        << " sent late, worst " << pacer.maxBehindMs() << " ms behind";
+    return out.str();
+}
 
-// The same, paced by `pacer`, which counts the sends the machine delayed.
-void sendRun(LoopbackSender& sender, SendPacer& pacer, uint16_t firstSeq, uint32_t firstTimestamp, uint16_t count,
-             float value, uint32_t ssrc) {
-    for (uint16_t i = 0; i < count; ++i) {
-        sender.sendL24(static_cast<uint16_t>(firstSeq + i), firstTimestamp + i * kFramesPerPacket, 2, value, ssrc);
-        pacer.wait();
-    }
+// A send made late may arrive past its playout point and be dropped: each one
+// may cost one packet of tone, which becomes silence inside the heard region
+// or shortens it at either end. With no late sends every count is exact.
+void checkHeardRun(const std::vector<float>& region, size_t tonePackets, size_t silentPackets,
+                   const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer, const char* what) {
+    const size_t late = pacer.lateSends();
+    const size_t tone = countNear(region, 0.25f);
+    const size_t silence = countNear(region, 0.0f);
+    const size_t want = (tonePackets + silentPackets) * kFramesPerPacket;
+    const bool whole = tone % kFramesPerPacket == 0 && silence % kFramesPerPacket == 0;
+    CHECK(whole && tone <= tonePackets * kFramesPerPacket && tone + late * kFramesPerPacket >= tonePackets * kFramesPerPacket,
+          "every received packet should be played (got " << tone << " of " << tonePackets * kFramesPerPacket
+                                                         << " samples; " << dropSummary(stats, pacer) << ")");
+    CHECK(region.size() <= want && region.size() + late * kFramesPerPacket >= want,
+          what << " must not add latency: the stream should keep its length (got " << region.size() << " samples, want "
+               << want << "; " << dropSummary(stats, pacer) << ")");
+    CHECK(region.size() == tone + silence && silence >= silentPackets * kFramesPerPacket &&
+              silence <= (silentPackets + late) * kFramesPerPacket,
+          what << " should be exactly its own length of silence (got " << silence << " samples, want "
+               << silentPackets * kFramesPerPacket << "; " << dropSummary(stats, pacer) << ")");
 }
 
 // A receiver follows a restarted sender after a run of packets covering
@@ -1811,8 +1834,8 @@ void testRejectedPacketDoesNotDropTheNext() {
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
         LoopbackSender sender(c.group, c.port);
 
-        auto next = std::chrono::steady_clock::now();
-        sendRun(sender, next, 1000, 0, 10, 0.25f, 0x12345678, kNoSkip);
+        SendPacer pacer;
+        sendRun(sender, pacer, 1000, 0, 10, 0.25f, 0x12345678);
 
         // Same SSRC and the sequence number the real sender would use next, so
         // the old code bridged the gap and checked the following packet against
@@ -1834,9 +1857,9 @@ void testRejectedPacketDoesNotDropTheNext() {
             packet[8] = 0x12; packet[9] = 0x34; packet[10] = 0x56; packet[11] = 0x78;
             sender.sendRaw(packet.data(), packet.size());
         }
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
 
-        sendRun(sender, next, 1011, 11 * kFramesPerPacket, 10, 0.25f, 0x12345678, kNoSkip);
+        sendRun(sender, pacer, 1011, 11 * kFramesPerPacket, 10, 0.25f, 0x12345678);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const auto stats = receiver.getStatistics();
@@ -1861,13 +1884,13 @@ void testTimestampStepResyncsAfterOnePacket() {
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     LoopbackSender sender("239.69.99.202", 55304);
 
-    auto next = std::chrono::steady_clock::now();
-    sendRun(sender, next, 2000, 0, 10, 0.25f, 0x12345678, kNoSkip);
+    SendPacer pacer;
+    sendRun(sender, pacer, 2000, 0, 10, 0.25f, 0x12345678);
     // Contiguous sequence, timestamp jumps by 1000 frames: valid RTP, wrong
     // place on the timeline.
     sender.sendL24(2010, 1432, 2, 0.5f, 0x12345678);
-    std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
-    sendRun(sender, next, 2011, 1480, 10, 0.25f, 0x12345678, kNoSkip);
+    pacer.wait();
+    sendRun(sender, pacer, 2011, 1480, 10, 0.25f, 0x12345678);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     const auto stats = receiver.getStatistics();
@@ -1907,16 +1930,12 @@ void testLostPacketKeepsTimeline() {
 
     constexpr uint16_t kPackets = 30;
     RTPReceiver::PlacementStatistics stats{};
-    const auto region = heardRegion(receiveAndListen("239.69.99.4", 55014, [](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
-        sendRun(sender, next, 2000, 0, kPackets, 0.25f, 0x12345678, [](uint16_t i) { return i == 15; });
+    SendPacer pacer;
+    const auto region = heardRegion(receiveAndListen("239.69.99.4", 55014, [&pacer](LoopbackSender& sender) {
+        sendRun(sender, pacer, 2000, 0, kPackets, 0.25f, 0x12345678, [](uint16_t i) { return i == 15; });
     }, &stats));
 
-    CHECK(countNear(region, 0.25f) == (kPackets - 1) * kFramesPerPacket,
-          "every received packet should be played (late drops: " << stats.lateDrops << ")");
-    CHECK(region.size() == kPackets * kFramesPerPacket,
-          "the stream should keep its length (got " << region.size() << " samples, want " << kPackets * kFramesPerPacket << ")");
-    CHECK(countNear(region, 0.0f) == kFramesPerPacket, "the lost packet should leave exactly one packet of silence");
+    checkHeardRun(region, kPackets - 1, 1, stats, pacer, "the lost packet");
 }
 
 void testLatePacketIsIgnored() {
@@ -1989,18 +2008,14 @@ void testOutageKeepsTimeline() {
 
     constexpr uint16_t kOutagePackets = 40;
     RTPReceiver::PlacementStatistics stats{};
-    const auto region = heardRegion(receiveAndListen("239.69.99.9", 55024, [](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
+    SendPacer pacer;
+    const auto region = heardRegion(receiveAndListen("239.69.99.9", 55024, [&pacer](LoopbackSender& sender) {
         // Packets 30..69 are lost in a 40 ms outage
-        sendRun(sender, next, 7000, 0, 100, 0.25f, 0x12345678,
+        sendRun(sender, pacer, 7000, 0, 100, 0.25f, 0x12345678,
                 [](uint16_t i) { return i >= 30 && i < 30 + kOutagePackets; });
     }, &stats));
 
-    CHECK(countNear(region, 0.25f) == (100 - kOutagePackets) * kFramesPerPacket,
-          "every received packet should play (late drops: " << stats.lateDrops << ")");
-    CHECK(region.size() == 100 * kFramesPerPacket,
-          "the outage must not add latency: the stream should keep its length (got " << region.size() << " samples)");
-    CHECK(countNear(region, 0.0f) == kOutagePackets * kFramesPerPacket, "the outage should be exactly its own length of silence");
+    checkHeardRun(region, 100 - kOutagePackets, kOutagePackets, stats, pacer, "the outage");
 }
 
 // ---------------------------------------------------------------------------
