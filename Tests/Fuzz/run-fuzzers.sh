@@ -42,7 +42,7 @@ fuzz() {
     local seeds="$ROOT/Tests/Fuzz/corpus/$corpus"
     local status=0
     if [[ "$SECONDS_PER_TARGET" == 0 ]]; then
-        "$OUT/$name" -runs=0 "$seeds" || status=$?
+        "$OUT/$name" -runs=0 -artifact_prefix="$OUT/crashes/$name-" "$seeds" || status=$?
     else
         mkdir -p "$OUT/corpus/$corpus"
         "$OUT/$name" -max_total_time="$SECONDS_PER_TARGET" -max_len=4096 -timeout=10 \

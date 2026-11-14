@@ -77,6 +77,11 @@ CLAUDE.md
 *.zip
 
 # Test outputs
+# libFuzzer writes crashing inputs to the working directory by default
+crash-*
+oom-*
+timeout-*
+leak-*
 Tests/output/
 Tests/*.log
 
