@@ -34,6 +34,10 @@ namespace {
 // 100 us on a quiet machine; a loaded CI runner's scheduling shows up as
 // phase error, so it gets 500 us (still far from an unlocked receiver)
 const double kPhaseLimitNs = AES67::TestWait::timingLimit(100000.0, 500000.0);
+// The master runs at +100 ppm, so a receiver that didn't follow its rate is
+// 100 ppm out: the relaxed limit still catches that, but not a shared CI
+// runner's scheduling (30-40 ppm seen a second after lock)
+const double kRateLimitPpm = AES67::TestWait::timingLimit(20.0, 60.0);
 
 int checksPassed = 0;
 int checksFailed = 0;
@@ -97,7 +101,8 @@ void testFollowsATwoStepMaster() {
               << r.status.pathDelayNs / 1000 << " us" << std::endl;
     CHECK(r.locked, "locks to the master");
     CHECK(std::fabs(r.phaseErrorNs) < kPhaseLimitNs, "knows the master's time within " << kPhaseLimitNs / 1000 << " us (" << r.phaseErrorNs << " ns)");
-    CHECK(std::fabs(r.rateErrorPpm) < 20, "and its rate (+100 ppm) within 20 ppm (" << r.rateErrorPpm << ")");
+    CHECK(std::fabs(r.rateErrorPpm) < kRateLimitPpm,
+          "and its rate (+100 ppm) within " << kRateLimitPpm << " ppm (" << r.rateErrorPpm << ")");
     CHECK(r.status.master && r.status.master->sender == master.identity(), "the master is the one announcing");
     CHECK(r.status.delayResponses > 0 && master.multicastDelayRequests() > 0 && master.unicastDelayRequests() == 0,
           "Delay_Req is sent to the multicast group");
