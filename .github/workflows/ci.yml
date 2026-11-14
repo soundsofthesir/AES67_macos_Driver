@@ -19,9 +19,8 @@ concurrency:
 jobs:
   macos:
     name: macOS (${{ matrix.name }})
-    # macOS 14: Sequoia's Local Network privacy blocks the multicast tests for
-    # binaries that can't be granted the permission on a CI runner
-    runs-on: macos-14
+    # macos-14 runners are no longer offered ("configuration not supported")
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -44,7 +43,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: aspl-prefix
-          key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-14
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-15
 
       - name: Build libASPL
         if: steps.aspl-cache.outputs.cache-hit != 'true'
