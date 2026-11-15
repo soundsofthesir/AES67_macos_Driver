@@ -223,17 +223,17 @@ std::string dropSummary(const RTPReceiver::PlacementStatistics& stats, const Sen
 
 // A send made late may arrive past its playout point and be dropped, and a
 // packet the receive thread wrote after playout had passed it is counted as
-// missedPlayout (#185): each one may cost one packet of tone, which becomes
-// silence inside the heard region or shortens it at either end. With neither,
-// every count is exact.
+// missedPlayout (#185): each one may cost up to one packet of tone, which
+// becomes silence inside the heard region or shortens it at either end. A
+// packet that arrives while its playout passes is heard in part, so the
+// counts need not be whole packets. With neither, every count is exact.
 void checkHeardRun(const std::vector<float>& region, size_t tonePackets, size_t silentPackets,
                    const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer, const char* what) {
     const size_t late = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
     const size_t tone = countNear(region, 0.25f);
     const size_t silence = countNear(region, 0.0f);
     const size_t want = (tonePackets + silentPackets) * kFramesPerPacket;
-    const bool whole = tone % kFramesPerPacket == 0 && silence % kFramesPerPacket == 0;
-    CHECK(whole && tone <= tonePackets * kFramesPerPacket && tone + late * kFramesPerPacket >= tonePackets * kFramesPerPacket,
+    CHECK(tone <= tonePackets * kFramesPerPacket && tone + late * kFramesPerPacket >= tonePackets * kFramesPerPacket,
           "every received packet should be played (got " << tone << " of " << tonePackets * kFramesPerPacket
                                                          << " samples; " << dropSummary(stats, pacer) << ")");
     CHECK(region.size() <= want && region.size() + late * kFramesPerPacket >= want,
@@ -1945,20 +1945,32 @@ void testLatePacketIsIgnored() {
     std::cout << "RX ignores a single very late packet" << std::endl;
 
     constexpr uint16_t kPackets = 60;
-    const auto region = heardRegion(receiveAndListen("239.69.99.5", 55016, [](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
+    RTPReceiver::PlacementStatistics stats{};
+    SendPacer pacer;
+    const auto region = heardRegion(receiveAndListen("239.69.99.5", 55016, [&pacer](LoopbackSender& sender) {
         for (uint16_t i = 0; i < kPackets; ++i) {
             sender.sendL24(static_cast<uint16_t>(3000 + i), 400 * kFramesPerPacket + i * kFramesPerPacket, 2, 0.25f);
             if (i == 30) {
                 sender.sendL24(static_cast<uint16_t>(3000 - 400), 0, 2, 0.9f);  // 400 packets late
             }
-            std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+            pacer.wait();
         }
-    }));
+    }, &stats));
 
+    // The packet sent 400 packets late is itself one late drop. Beyond it,
+    // only a send the machine delayed may cost up to a packet of tone: dropped
+    // past its playout point, or heard in part when it arrives as playout
+    // passes. So may a packet counted as missedPlayout (#185).
+    const size_t late = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
+    const size_t tone = countNear(region, 0.25f);
+    const size_t silence = countNear(region, 0.0f);
+    const size_t want = static_cast<size_t>(kPackets) * kFramesPerPacket;
     CHECK(countNear(region, 0.9f) == 0, "the late packet should not be played");
-    CHECK(countNear(region, 0.25f) == kPackets * kFramesPerPacket, "every in-order packet should still be played");
-    CHECK(countNear(region, 0.0f) == 0, "a late packet should not cause silence");
+    CHECK(tone <= want && tone + late * kFramesPerPacket >= want,
+          "every in-order packet should still be played (got " << tone << " of " << want << " samples; "
+                                                               << dropSummary(stats, pacer) << ")");
+    CHECK(silence <= late * kFramesPerPacket,
+          "a late packet should not cause silence (got " << silence << " samples; " << dropSummary(stats, pacer) << ")");
 }
 
 void testInterleavedSecondSourceIsIgnored() {

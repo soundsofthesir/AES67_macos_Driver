@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstring>
 #include <numeric>
+#include <sstream>
 #include <algorithm>
 #include <unistd.h>
 
@@ -83,6 +84,42 @@ namespace {
             route.buffer->write(start, frames, mix.data(), kNumChannels, route.deviceChannelStart);
         });
         return start;
+    }
+
+    constexpr size_t kPacketFrames = 48;
+
+    // What may excuse an unheard packet, read while the receiver still runs.
+    // The receiver judges lateness by arrival time, so a send the machine
+    // delayed may arrive past its playout point and be dropped, or arrive
+    // while its playout passes and be heard in part. A packet the receive
+    // thread wrote after playout had passed it counts as missedPlayout (#185).
+    // Each of those may cost up to one packet. With none, every count is exact.
+    struct Excused {
+        size_t packets{0};
+        std::string summary;  // for failure messages
+
+        Excused(const RTPReceiver& receiver, const TestSupport::SendPacer& pacer) {
+            const auto stats = receiver.getPlacementStatistics();
+            packets = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
+            std::ostringstream out;
+            out << "late drops " << stats.lateDrops << ", early drops " << stats.earlyDrops << ", missed playout "
+                << stats.missedPlayout << ", " << pacer.lateSends() << " sent late, worst " << pacer.maxBehindMs()
+                << " ms behind";
+            summary = out.str();
+        }
+    };
+
+    bool playedAllBut(size_t frames, size_t packets, const Excused& excused) {
+        const size_t want = packets * kPacketFrames;
+        return frames <= want && frames + excused.packets * kPacketFrames >= want;
+    }
+
+    // Every sample is `value`. An excused packet plays as silence, so silence
+    // passes only when a packet is excused.
+    bool carries(const std::vector<float>& region, float value, float tolerance, const Excused& excused) {
+        return std::all_of(region.begin(), region.end(), [&](float v) {
+            return std::abs(v - value) < tolerance || (excused.packets > 0 && v == 0.0f);
+        });
     }
 
     void resetClock(MediaClock& clock) {
@@ -242,29 +279,32 @@ bool testRTPReceiveToRingBuffer() {
 
     // Real-time pacing: one 1 ms packet per millisecond
     const int numPackets = 20;
-    auto next = std::chrono::steady_clock::now();
+    TestSupport::SendPacer pacer;
     for (int i = 0; i < numPackets; ++i) {
         bool sent = sendRawRTPPacket(rxAddr, rxPort, static_cast<uint16_t>(i), static_cast<uint32_t>(i * 48),
                                      0x12345678, PT_AES67_L16, l16Payload.data(), l16Payload.size());
         TEST_ASSERT(sent, "RTP packet should be sent successfully");
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
 
     // Let playout pass the last packet, then see what the IO thread heard
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto heard = reader.stopAll();
 
-    TEST_ASSERT(TestSupport::countNonSilent(heard[0]) == numPackets * frameCount,
-                "Channel 0 should play every received frame");
-    TEST_ASSERT(TestSupport::countNonSilent(heard[1]) == numPackets * frameCount,
-                "Channel 1 should play every received frame");
+    const Excused excused(receiver, pacer);
+    const size_t played0 = TestSupport::countNonSilent(heard[0]);
+    const size_t played1 = TestSupport::countNonSilent(heard[1]);
+    TEST_ASSERT(playedAllBut(played0, numPackets, excused),
+                "Channel 0 should play every received frame (got " << played0 << " of " << numPackets * frameCount
+                                                                   << "; " << excused.summary << ")");
+    TEST_ASSERT(playedAllBut(played1, numPackets, excused),
+                "Channel 1 should play every received frame (got " << played1 << " of " << numPackets * frameCount
+                                                                   << "; " << excused.summary << ")");
 
     const auto ch0 = TestSupport::heardRegion(heard[0]);
     const auto ch1 = TestSupport::heardRegion(heard[1]);
-    TEST_ASSERT(std::all_of(ch0.begin(), ch0.end(), [](float v) { return std::abs(v - 0.5f) < 0.01f; }),
-                "Channel 0 samples should be ~0.5f");
-    TEST_ASSERT(std::all_of(ch1.begin(), ch1.end(), [](float v) { return std::abs(v + 0.5f) < 0.01f; }),
-                "Channel 1 samples should be ~-0.5f");
+    TEST_ASSERT(carries(ch0, 0.5f, 0.01f, excused), "Channel 0 samples should be ~0.5f (" << excused.summary << ")");
+    TEST_ASSERT(carries(ch1, -0.5f, 0.01f, excused), "Channel 1 samples should be ~-0.5f (" << excused.summary << ")");
 
     TEST_ASSERT(TestSupport::countNonSilent(heard[2]) == 0, "Unmapped channel 2 should be silent");
     TEST_ASSERT(TestSupport::countNonSilent(heard[3]) == 0, "Unmapped channel 3 should be silent");
@@ -415,17 +455,21 @@ bool testUnderrunBehavior() {
     std::vector<float> audio(48 * 2, 0.1f);
     std::vector<uint8_t> payload(audio.size() * 2);
     L16Codec::encode(audio.data(), audio.size(), payload.data());
-    auto next = std::chrono::steady_clock::now();
+    TestSupport::SendPacer pacer;
     for (int i = 0; i < 3; ++i) {
         sendRawRTPPacket("239.69.69.4", 15010, i, i * 48, 0xAABBCCDD, PT_AES67_L16, payload.data(), payload.size());
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     const auto heard = reader.stop();
+    const Excused excused(receiver, pacer);
     receiver.stop();
 
     const auto region = TestSupport::heardRegion(heard);
-    TEST_ASSERT(region.size() == 3 * 48, "The three packets should play as 144 frames");
+    const size_t played = TestSupport::countNonSilent(heard);
+    TEST_ASSERT(playedAllBut(played, 3, excused) && region.size() <= 3 * 48,
+                "The three packets should play as 144 frames (got " << played << " over " << region.size() << "; "
+                                                                    << excused.summary << ")");
     const auto last = std::find_if(heard.rbegin(), heard.rend(), [](float v) { return v != 0.0f; });
     const size_t trailingSilence = static_cast<size_t>(last - heard.rbegin());
     TEST_ASSERT(trailingSilence > 48 * 100, "Playout should continue in silence after the sender stops");
@@ -530,31 +574,35 @@ bool testMultiStreamChannelIsolation() {
     L16Codec::encode(audioB.data(), audioB.size(), payloadB.data());
 
     const int numPackets = 20;
-    auto next = std::chrono::steady_clock::now();
+    // One wait paces both streams, so a late send may cost a packet on each
+    TestSupport::SendPacer pacer;
     for (int i = 0; i < numPackets; ++i) {
         sendRawRTPPacket("239.69.69.5", 15012, i, i * 48, 0x11111111, PT_AES67_L16, payloadA.data(), payloadA.size());
         sendRawRTPPacket("239.69.69.6", 15014, i, i * 48, 0x22222222, PT_AES67_L16, payloadB.data(), payloadB.size());
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto heard = reader.stopAll();
+    const Excused excusedA(receiverA, pacer);
+    const Excused excusedB(receiverB, pacer);
     receiverA.stop();
     receiverB.stop();
 
     const size_t expected = numPackets * 48;
-    TEST_ASSERT(TestSupport::countNonSilent(heard[0]) == expected, "Stream A: channel 0 should play every frame");
-    TEST_ASSERT(TestSupport::countNonSilent(heard[1]) == expected, "Stream A: channel 1 should play every frame");
-    TEST_ASSERT(TestSupport::countNonSilent(heard[4]) == expected, "Stream B: channel 4 should play every frame");
-    TEST_ASSERT(TestSupport::countNonSilent(heard[5]) == expected, "Stream B: channel 5 should play every frame");
+    for (uint32_t ch : {0u, 1u, 4u, 5u}) {
+        const Excused& excused = ch < 2 ? excusedA : excusedB;
+        const size_t played = TestSupport::countNonSilent(heard[ch]);
+        TEST_ASSERT(playedAllBut(played, numPackets, excused),
+                    "Stream " << (ch < 2 ? "A" : "B") << ": channel " << ch << " should play every frame (got "
+                              << played << " of " << expected << "; " << excused.summary << ")");
+    }
     TEST_ASSERT(TestSupport::countNonSilent(heard[2]) == 0, "Channel 2 (gap between streams) should be silent");
     TEST_ASSERT(TestSupport::countNonSilent(heard[3]) == 0, "Channel 3 (gap between streams) should be silent");
 
     const auto a = TestSupport::heardRegion(heard[0]);
     const auto b = TestSupport::heardRegion(heard[4]);
-    TEST_ASSERT(std::all_of(a.begin(), a.end(), [](float v) { return std::abs(v - 0.3f) < 0.02f; }),
-                "Stream A channel 0 values should be ~0.3f");
-    TEST_ASSERT(std::all_of(b.begin(), b.end(), [](float v) { return std::abs(v + 0.7f) < 0.02f; }),
-                "Stream B channel 4 values should be ~-0.7f");
+    TEST_ASSERT(carries(a, 0.3f, 0.02f, excusedA), "Stream A channel 0 values should be ~0.3f (" << excusedA.summary << ")");
+    TEST_ASSERT(carries(b, -0.7f, 0.02f, excusedB), "Stream B channel 4 values should be ~-0.7f (" << excusedB.summary << ")");
     TEST_ASSERT(!receiverA.isRunning() && !receiverB.isRunning(), "Receivers should stop");
 
     std::cout << "PASS" << std::endl;
@@ -659,13 +707,14 @@ bool testChannelMappingThroughReceiver() {
     std::vector<uint8_t> payload(audio.size() * 2);
     L16Codec::encode(audio.data(), audio.size(), payload.data());
 
-    auto next = std::chrono::steady_clock::now();
+    TestSupport::SendPacer pacer;
     for (int i = 0; i < 15; ++i) {
         sendRawRTPPacket("239.69.69.7", 15016, i, i * 48, 0x33333333, PT_AES67_L16, payload.data(), payload.size());
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     const auto heard = reader.stopAll();
+    const Excused excused(receiver, pacer);
     receiver.stop();
 
     for (uint32_t ch = 0; ch < 24; ++ch) {
@@ -676,9 +725,12 @@ bool testChannelMappingThroughReceiver() {
         }
         const float expected = 0.1f * (ch - 16 + 1);
         const auto region = TestSupport::heardRegion(heard[ch]);
-        TEST_ASSERT(region.size() == 15 * 48, "Mapped channels should play every frame");
-        TEST_ASSERT(std::all_of(region.begin(), region.end(), [expected](float v) { return std::abs(v - expected) < 0.02f; }),
-                    "Device channel " << ch << " should carry stream channel " << ch - 16);
+        const size_t played = TestSupport::countNonSilent(heard[ch]);
+        TEST_ASSERT(playedAllBut(played, 15, excused) && region.size() <= 15 * 48,
+                    "Mapped channels should play every frame (channel " << ch << " got " << played << " over "
+                                                                        << region.size() << "; " << excused.summary << ")");
+        TEST_ASSERT(carries(region, expected, 0.02f, excused),
+                    "Device channel " << ch << " should carry stream channel " << ch - 16 << " (" << excused.summary << ")");
     }
 
     std::cout << "PASS" << std::endl;
@@ -704,12 +756,12 @@ bool testReceiverStatistics() {
     L16Codec::encode(audio.data(), audio.size(), payload.data());
 
     // Packets 0-9, then 10-14 are lost and 15 arrives on schedule
-    auto next = std::chrono::steady_clock::now();
+    TestSupport::SendPacer pacer;
     for (int i = 0; i < 16; ++i) {
         if (i < 10 || i == 15) {
             sendRawRTPPacket("239.69.69.8", 15018, i, i * 48, 0x44444444, PT_AES67_L16, payload.data(), payload.size());
         }
-        std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+        pacer.wait();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -718,7 +770,10 @@ bool testReceiverStatistics() {
     TEST_ASSERT(stats.bytesReceived == 11 * payload.size(), "Should count every payload byte");
     TEST_ASSERT(stats.malformedPackets == 0, "Should have no malformed packets");
     TEST_ASSERT(stats.packetsLost == 5, "Should count exactly the 5 lost packets");
-    TEST_ASSERT(receiver.getPlacementStatistics().lateDrops == 0, "On-time packets should not be late");
+    // Only a packet the machine sent late may be dropped as late
+    const auto placement = receiver.getPlacementStatistics();
+    TEST_ASSERT(placement.lateDrops <= pacer.lateSends() && placement.earlyDrops == 0,
+                "On-time packets should not be dropped (" << Excused(receiver, pacer).summary << ")");
 
     receiver.stop();
     receiver.resetStatistics();
