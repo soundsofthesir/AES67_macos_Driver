@@ -36,6 +36,7 @@ public:
         uint64_t lateDrops{0};     // arrived after their playout time
         uint64_t earlyDrops{0};    // too far ahead of playout
         uint64_t foreignDrops{0};  // from another SSRC on the group
+        uint64_t missedPlayout{0}; // on time, but written after the IO thread had read past them
         uint64_t reanchors{0};     // timeline re-anchored (restart or drift)
     };
 
@@ -156,6 +157,7 @@ private:
     std::atomic<uint64_t> lateDrops_{0};
     std::atomic<uint64_t> earlyDrops_{0};
     std::atomic<uint64_t> foreignDrops_{0};
+    std::atomic<uint64_t> missedPlayout_{0};
     std::atomic<uint64_t> reanchors_{0};
 
     // Connection state
