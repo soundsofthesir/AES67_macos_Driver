@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Experimental.** Updated 29 October 2026.
+> **Experimental.** Updated 15 November 2026.
 
 A free, open-source AES67 driver for the Mac. The goal is to get a console's network audio onto a Mac without a licence, and to send the Mac's apps back out to the network as separate streams.
 
@@ -15,6 +15,8 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 | PTP | Built, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Holdover and recovery after the grandmaster goes quiet are in. Tested on loopback against test masters; a real network is next ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
 | Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set in `streams.json`. |
 | Install | Planned | Build from source only, with Homebrew and CMake. No downloadable installer yet. |
+
+CI builds and tests every change on macOS (Release, and with AddressSanitizer and UndefinedBehaviorSanitizer) and on Linux.
 
 ## Steps
 
@@ -37,7 +39,7 @@ A signed and notarized download on the GitHub releases page. Installing it won't
 
 The Manager app controls the driver directly. Streams announced on the network appear in a list and can be added with a click, without editing files or restarting Core Audio.
 
-- PTP lock and offset, packet loss and the network interface in use, shown live.
+- PTP lock and offset, packet loss, audio that arrived but was written too late to play, and the network interface in use, shown live. The driver already counts late audio per stream.
 - Plain warnings for common network problems: no IGMP querier on the switch, Energy Efficient Ethernet, Wi-Fi, and streams outside Dante's 239.69.x.x range.
 
 ### 4. Per-app routing (planned)
@@ -66,7 +68,8 @@ When no PTP grandmaster is present, the Mac provides the clock itself. That allo
 ## Alongside the steps
 
 - **Compatibility list.** A public table of tested devices, firmware versions and results, filled in from testers' reports.
-- **Network input hardening.** The driver reads stream announcements, RTP and PTP packets from any device on the network inside the Mac's audio system. The SDP, RTP and PTP parsers now refuse malformed fields; fuzz testing is next.
+- **Network input hardening.** The driver reads stream announcements, RTP and PTP packets from any device on the network inside the Mac's audio system. The SDP, RTP and PTP parsers refuse malformed fields, PTP state has fixed limits so a flood of Announce or Sync messages can't grow memory, and one malformed RTP packet can't cause the next good one to be dropped. CI replays a fuzz corpus on every change and fuzzes each parser nightly.
+- **Failures inside coreaudiod.** A C++ exception in a Core Audio callback, such as a failed allocation, now returns an error instead of terminating coreaudiod, and a start that fails partway is rolled back ([#147](https://github.com/soundsofthesir/AES67_macos_Driver/issues/147)).
 - **Smaller fixes.** Transmit stalls while no app uses the device ([#25](https://github.com/soundsofthesir/AES67_macos_Driver/issues/25)), DSCP marking for PTP and RTP ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)), and checking a stream's clock against the grandmaster ([#49](https://github.com/soundsofthesir/AES67_macos_Driver/issues/49)).
 - **Resampling (optional).** For senders that run on a different clock and can't follow PTP ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 

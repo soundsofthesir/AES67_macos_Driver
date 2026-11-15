@@ -17,6 +17,7 @@ An open-source AES67 network audio driver for macOS. It runs as a user-space Cor
 - Sending AES67 streams, continuously and on the device clock.
 - Announcing sent streams over SAP.
 - Rejoining streams after a network change (new IP address, Wi-Fi roam, cable replug).
+- Returning an error instead of terminating coreaudiod when a Core Audio callback hits a C++ exception, such as a failed allocation. A start that fails partway is rolled back.
 
 **Built and tested on loopback only, off by default:**
 
@@ -37,7 +38,7 @@ Next up is trying PTP and sending on a real network with Dante, RAVENNA and othe
 
 - PTP is off by default and untested on a real network.
 - Without PTP the driver follows one sender's clock, and a second sender on a different clock drifts and occasionally resyncs. With PTP the same goes for any sender that isn't on the grandmaster ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
-- Received packets that arrive more than 8 ms late play as silence.
+- Received packets that arrive more than 8 ms late play as silence. So do packets that arrive on time but that the receive thread writes after Core Audio has read past them, which happens when the thread is held off the CPU. The driver counts these per stream but doesn't report the count anywhere yet.
 - The Manager app doesn't control the driver yet.
 - Dante's default AES67 multicast range is 239.69.x.x. The driver logs a warning for send streams outside it.
 - If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`).
@@ -103,9 +104,9 @@ PTP is off unless `ptp.json` turns it on. It's looked for in `$AES67_PTP_CONFIG_
 ## Testing tools
 
 - CI (`.github/workflows/ci.yml`) builds and runs `ctest` on macOS in Release and with AddressSanitizer + UndefinedBehaviorSanitizer (`-DAES67_SANITIZE=ON`), and runs the tests that need no Apple frameworks on Linux with both sanitizers (`Tests/Linux/run-portable-tests.sh`).
-- CI sets `AES67_TEST_RELAXED_TIMING=1`, which widens the tests' limits on timing accuracy (PTP phase, packets outside the playout window, packet departure times) for shared runners. Ordering and continuity checks don't change.
+- CI sets `AES67_TEST_RELAXED_TIMING=1`, which widens the tests' limits on timing accuracy (PTP phase, packet departure times, and how many packets a sender gets out in a set time) for shared runners. Ordering and continuity checks don't change. Receive tests excuse only packets their own sender sent late, or that the driver counted as written after playout.
 - `Tests/Fuzz/run-fuzzers.sh` fuzzes the parsers that read network packets and config files (PTP, SAP, SDP, `streams.json`, `ptp.json`) with libFuzzer on Linux. CI replays `Tests/Fuzz/corpus` on every PR, and fuzzes each parser for 5 minutes nightly (`.github/workflows/fuzz.yml`).
-- `ctest` runs 25 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
+- `ctest` runs 26 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
 - `AES67TestSender` sends a test tone **onto your network** (default 239.1.1.1:5004).
 - `AES67ClockProbeClient` measures the device's clock and checks the audio is continuous. Build it with `-DBUILD_SPIKES=ON`.
 - Driver logs go to the unified log: `sudo log show --info --predicate 'subsystem == "com.aes67driver"'`, or `log stream` with the same predicate to watch live.
