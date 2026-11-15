@@ -1,6 +1,7 @@
 /// @file PtpBestMaster.cpp
 
 #include "PtpBestMaster.h"
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -66,12 +67,32 @@ bool BestMaster::onAnnounce(const Message& message, double now) {
         return false;
     }
 
-    Record& record = masters_[message.header.source];
+    // Announces from many identities must not grow the table without bound.
+    // Make room by dropping silent masters, but never evict one that is still
+    // announcing: a flood of new identities could otherwise push out the
+    // master we follow.
+    const PortIdentity& source = message.header.source;
+    if (masters_.find(source) == masters_.end() && masters_.size() >= config_.maxForeignMasters) {
+        for (auto it = masters_.begin(); it != masters_.end();) {
+            const bool keep = alive(it->second, now) || it->first == selected_;
+            it = keep ? std::next(it) : masters_.erase(it);
+        }
+        if (masters_.size() >= config_.maxForeignMasters) {
+            return false;
+        }
+    }
+
+    Record& record = masters_[source];
     record.latest = Candidate{message.header.source, *message.announce, message.header.logMessageInterval};
     record.lastSeen = now;
     record.arrivals.push_back(now);
     const double window = config_.foreignMasterWindow * intervalOf(record.latest);
     while (!record.arrivals.empty() && now - record.arrivals.front() > window) {
+        record.arrivals.pop_front();
+    }
+    // Qualifying needs only the latest threshold arrivals, so a sender that
+    // announces far faster than its interval cannot grow the history.
+    while (record.arrivals.size() > static_cast<std::size_t>(std::max(config_.foreignMasterThreshold, 1))) {
         record.arrivals.pop_front();
     }
     return reselect(now);

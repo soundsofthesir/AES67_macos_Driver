@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <exception>
 #include <sys/select.h>
 
 namespace AES67 {
@@ -99,11 +100,40 @@ bool RTPReceiver::start() {
         return false;
     }
 
+    // Everything below allocates or creates a thread. A throw here must not
+    // leave the socket open, a route published, or running_ true (#147).
+    try {
+        if (startStreaming()) {
+            return true;
+        }
+    } catch (const std::exception& e) {
+        try {
+            AES67_LOGF("RTPReceiver::start: %s failed: %s", sdp_.sessionName.c_str(), e.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            AES67_LOGF("RTPReceiver::start: %s failed with an unknown exception",
+                       sdp_.sessionName.c_str());
+        } catch (...) {
+        }
+    }
+    cleanupFailedStart();
+    return false;
+}
+
+bool RTPReceiver::startStreaming() {
     // Playout buffer: room for the playable window (two link offsets ahead of
-    // the read point) plus packets in flight, with margin
+    // the read point) plus packets in flight, with margin. The IO thread can
+    // read a whole Core Audio buffer that starts up to one IO period before
+    // now, so the ring must also span that buffer plus the link offset; a
+    // 4096-frame client otherwise ran past the oldest slot (#137). Use the
+    // same 16k-floor as TX, which already sizes for the largest IO buffer.
+    constexpr size_t kMinBufferFrames = 16384;
     const int64_t linkOffset = context_.linkOffsetFrames.load(std::memory_order_relaxed);
     const size_t packetFrames = sdp_.framecount > 0 ? sdp_.framecount : kMaxFramesPerPacket;
-    const size_t capacity = nextPowerOfTwo(std::max<size_t>(4096, 4 * static_cast<size_t>(linkOffset) + 4 * packetFrames));
+    const size_t capacity = nextPowerOfTwo(
+        std::max<size_t>(kMinBufferFrames, 4 * static_cast<size_t>(linkOffset) + 4 * packetFrames));
     buffer_ = std::make_unique<TimestampedAudioBuffer>(sdp_.numChannels, capacity);
 
     RtpPlacement::Config placementConfig;
@@ -116,12 +146,12 @@ bool RTPReceiver::start() {
     placement_ = std::make_unique<RtpPlacement>(placementConfig, context_.networkTime);
     lastClockGeneration_ = 0;
     lastPacket_ = LastPacket{};
+    missedPlayout_.store(0, std::memory_order_relaxed);
     decodeBuffer_.assign(kMaxFramesPerPacket * sdp_.numChannels, 0.0f);
 
     if (!context_.routing.publish(buffer_.get(), static_cast<uint32_t>(mapping_.deviceChannelStart))) {
         AES67_LOGF("RTPReceiver::start: cannot route %u channels at device channel %zu (stream=%s)",
                    sdp_.numChannels, mapping_.deviceChannelStart, sdp_.sessionName.c_str());
-        rtpSocket_.close();
         return false;
     }
 
@@ -143,6 +173,23 @@ bool RTPReceiver::start() {
     });
 
     return true;
+}
+
+void RTPReceiver::cleanupFailedStart() noexcept {
+    running_ = false;
+    try {
+        if (receiveThread_.joinable()) {
+            receiveThread_.join();
+        }
+    } catch (...) {
+    }
+    if (buffer_) {
+        context_.routing.unpublish(buffer_.get());
+    }
+    rtpSocket_.close();
+    buffer_.reset();
+    placement_.reset();
+    connected_ = false;
 }
 
 void RTPReceiver::stop() {
@@ -172,7 +219,8 @@ StatisticsSnapshot RTPReceiver::getStatistics() const {
 
 RTPReceiver::PlacementStatistics RTPReceiver::getPlacementStatistics() const {
     return {lateDrops_.load(std::memory_order_relaxed), earlyDrops_.load(std::memory_order_relaxed),
-            foreignDrops_.load(std::memory_order_relaxed), reanchors_.load(std::memory_order_relaxed)};
+            foreignDrops_.load(std::memory_order_relaxed), missedPlayout_.load(std::memory_order_relaxed),
+            reanchors_.load(std::memory_order_relaxed)};
 }
 
 void RTPReceiver::resetStatistics() {
@@ -279,25 +327,32 @@ void RTPReceiver::processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHo
     const bool sizeMatches = bytesPerFrame > 0 && packet.payloadSize % bytesPerFrame == 0 &&
                              frames >= packetFrames_.first && frames <= packetFrames_.second &&
                              frames <= kMaxFramesPerPacket;
+
+    // Reject a structurally unusable packet before it becomes the timestamp
+    // reference. Otherwise a single bad packet (the wrong payload type or a
+    // payload whose frame count does not fit this stream) leaves its frame
+    // count in lastPacket_, and the next valid packet is then dropped for a
+    // timestamp step that never happened (#144). A forged zero-length packet
+    // could do this forever, one real packet at a time.
+    if (!validatePacket(packet) || !packet.payload || !sizeMatches) {
+        rejectMalformed(packet, "unusable");
+        return;
+    }
+
     // ...which needs the timestamps: the packet after another from the same
     // source must start where that one's frames end
     const LastPacket previous = lastPacket_;
-    lastPacket_ = LastPacket{true, packet.header.ssrc, packet.header.sequenceNumber, packet.header.timestamp,
-                             static_cast<uint32_t>(frames)};
     const bool follows = previous.valid && previous.ssrc == packet.header.ssrc &&
                          static_cast<uint16_t>(previous.sequence + 1) == packet.header.sequenceNumber;
     const bool stepMatches = !follows || packet.header.timestamp - previous.timestamp == previous.frames;
 
-    if (!validatePacket(packet) || !packet.payload || !sizeMatches || !stepMatches) {
-        uint64_t count = stats_.malformedPackets.fetch_add(1, std::memory_order_relaxed) + 1;
-        // Log first occurrence and then every 100th to avoid flooding
-        if (count == 1 || count % 100 == 0) {
-            AES67_LOGF("RTPReceiver: malformed packet #%llu (ver=%u pt=%u size=%zu; expected pt=%u, %zu-%zu frames "
-                       "of %u channels) stream=%s",
-                       (unsigned long long)count, packet.header.version, packet.header.payloadType,
-                       packet.payloadSize, sdp_.payloadType, packetFrames_.first, packetFrames_.second,
-                       sdp_.numChannels, sdp_.sessionName.c_str());
-        }
+    // Keep a structurally valid packet as the next reference even when its
+    // timestamp does not step correctly: a real sender restart or timestamp
+    // jump costs one packet, not the rest of the stream.
+    lastPacket_ = LastPacket{true, packet.header.ssrc, packet.header.sequenceNumber, packet.header.timestamp,
+                             static_cast<uint32_t>(frames)};
+    if (!stepMatches) {
+        rejectMalformed(packet, "timestamp step");
         return;
     }
 
@@ -359,7 +414,26 @@ void RTPReceiver::processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHo
     }
 
     if (decode(packet.payload, packet.payloadSize) == frames) {
+        // Placement judged the packet by when it arrived. If this thread was
+        // kept off the CPU since then, the IO thread may already have read
+        // these positions as silence: count it (#185). Still written, so a
+        // reader that is behind the furthest one can use it.
+        if (placed.position + static_cast<int64_t>(frames) <= buffer_->readEnd()) {
+            missedPlayout_.fetch_add(1, std::memory_order_relaxed);
+        }
         buffer_->write(placed.position, frames, decodeBuffer_.data(), sdp_.numChannels, 0);
+    }
+}
+
+void RTPReceiver::rejectMalformed(const RTP::RTPPacket& packet, const char* reason) {
+    uint64_t count = stats_.malformedPackets.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Log first occurrence and then every 100th to avoid flooding
+    if (count == 1 || count % 100 == 0) {
+        AES67_LOGF("RTPReceiver: malformed packet #%llu (%s; ver=%u pt=%u size=%zu; expected pt=%u, %zu-%zu frames "
+                   "of %u channels) stream=%s",
+                   (unsigned long long)count, reason, packet.header.version, packet.header.payloadType,
+                   packet.payloadSize, sdp_.payloadType, packetFrames_.first, packetFrames_.second,
+                   sdp_.numChannels, sdp_.sessionName.c_str());
     }
 }
 

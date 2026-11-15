@@ -176,6 +176,10 @@ private:
     // nominal rate on the host clock (new seed)
     void RestartTimeline(Float64 sampleRate);
 
+    // Put the driver's rate, link offset, timeline and both streams' formats
+    // on `rate` (the HAL and StreamManager are set by the caller)
+    void ApplySampleRate(Float64 rate);
+
     // Lock a stream's physical and virtual formats to the given sample rate
     static void ApplyStreamSampleRate(aspl::Stream& stream, Float64 sampleRate);
 

@@ -149,7 +149,9 @@ target_compile_features(BenchmarkIOHandler PRIVATE cxx_std_17)
 
 # Link libASPL for benchmark
 if(ASPL_LIBRARY)
-    target_link_libraries(BenchmarkIOHandler PRIVATE ${ASPL_LIBRARY})
+    # libASPL calls CoreFoundation; an optimized build drops those objects,
+    # a Debug or sanitizer build doesn't
+    target_link_libraries(BenchmarkIOHandler PRIVATE ${ASPL_LIBRARY} "-framework CoreFoundation")
 endif()
 
 # Integration Test: Full Audio Path
@@ -191,6 +193,27 @@ target_include_directories(TestCriticalPathRegressions PRIVATE
 target_compile_features(TestCriticalPathRegressions PRIVATE cxx_std_17)
 
 target_link_libraries(TestCriticalPathRegressions PRIVATE
+    ${ASPL_LIBRARY}
+    "-framework CoreAudio"
+    "-framework CoreFoundation"
+    "-framework AudioToolbox"
+)
+
+# Test: no exception leaves a HAL callback (#147). Its own binary: it replaces
+# the global operator new to fail chosen allocations.
+add_executable(TestHalExceptions
+    TestHalExceptions.cpp
+    ${DRIVER_TEST_SOURCES}
+)
+
+target_include_directories(TestHalExceptions PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${ASPL_INCLUDE_DIR}
+)
+
+target_compile_features(TestHalExceptions PRIVATE cxx_std_17)
+
+target_link_libraries(TestHalExceptions PRIVATE
     ${ASPL_LIBRARY}
     "-framework CoreAudio"
     "-framework CoreFoundation"
@@ -426,6 +449,7 @@ add_test(NAME ClockRecovery COMMAND TestClockRecovery)
 add_test(NAME RxTimestamp COMMAND TestRxTimestamp)
 add_test(NAME ClockFoundations COMMAND TestClockFoundations)
 add_test(NAME CriticalPathRegressions COMMAND TestCriticalPathRegressions)
+add_test(NAME HalExceptions COMMAND TestHalExceptions)
 add_test(NAME SDPParser COMMAND TestSDPParser)
 add_test(NAME ChannelMapper COMMAND TestChannelMapper)
 add_test(NAME RingBuffer COMMAND TestRingBuffer)
