@@ -1942,20 +1942,31 @@ void testLatePacketIsIgnored() {
     std::cout << "RX ignores a single very late packet" << std::endl;
 
     constexpr uint16_t kPackets = 60;
-    const auto region = heardRegion(receiveAndListen("239.69.99.5", 55016, [](LoopbackSender& sender) {
-        auto next = std::chrono::steady_clock::now();
+    RTPReceiver::PlacementStatistics stats{};
+    SendPacer pacer;
+    const auto region = heardRegion(receiveAndListen("239.69.99.5", 55016, [&pacer](LoopbackSender& sender) {
         for (uint16_t i = 0; i < kPackets; ++i) {
             sender.sendL24(static_cast<uint16_t>(3000 + i), 400 * kFramesPerPacket + i * kFramesPerPacket, 2, 0.25f);
             if (i == 30) {
                 sender.sendL24(static_cast<uint16_t>(3000 - 400), 0, 2, 0.9f);  // 400 packets late
             }
-            std::this_thread::sleep_until(next += std::chrono::milliseconds(1));
+            pacer.wait();
         }
-    }));
+    }, &stats));
 
+    // The packet sent 400 packets late is itself one late drop. Beyond it,
+    // only a send the machine delayed may cost up to a packet of tone: dropped
+    // past its playout point, or heard in part when it arrives as playout passes.
+    const size_t late = pacer.lateSends();
+    const size_t tone = countNear(region, 0.25f);
+    const size_t silence = countNear(region, 0.0f);
+    const size_t want = static_cast<size_t>(kPackets) * kFramesPerPacket;
     CHECK(countNear(region, 0.9f) == 0, "the late packet should not be played");
-    CHECK(countNear(region, 0.25f) == kPackets * kFramesPerPacket, "every in-order packet should still be played");
-    CHECK(countNear(region, 0.0f) == 0, "a late packet should not cause silence");
+    CHECK(tone <= want && tone + late * kFramesPerPacket >= want,
+          "every in-order packet should still be played (got " << tone << " of " << want << " samples; "
+                                                               << dropSummary(stats, pacer) << ")");
+    CHECK(silence <= late * kFramesPerPacket,
+          "a late packet should not cause silence (got " << silence << " samples; " << dropSummary(stats, pacer) << ")");
 }
 
 void testInterleavedSecondSourceIsIgnored() {
