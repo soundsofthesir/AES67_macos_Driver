@@ -677,6 +677,45 @@ void testRepeatedSpaces() {
     std::cout << "PASSED\n";
 }
 
+// Found by Tests/Fuzz/FuzzSdpParser (#190): "c=IN IP4 addr\t/0" kept the
+// tab in the address, generate() wrote it at the end of the line (TTL 0 has
+// no "/ttl"), and the next parse trimmed it off
+void testConnectionAddressToken() {
+    std::cout << "Test: connection address must be a printable token... ";
+
+    const std::string head = "v=0\n"
+                             "o=- 1 1 IN IP4 10.0.0.5\n"
+                             "s=Address\n";
+    const std::string tail = "t=0 0\n"
+                             "m=audio 5004 RTP/AVP 96\n"
+                             "a=rtpmap:96 L24/48000/2\n";
+    auto parse = [&](const std::string& address) {
+        return SDPParser::parseString(head + "c=IN IP4 " + address + "\n" + tail);
+    };
+
+    assert(!parse("239.69.1.1\t/0").has_value());
+    assert(!parse("239.69.1.1\x01/32").has_value());
+    assert(!parse("239.69.1.1\x0b/32").has_value());
+    assert(!parse("239.69\t.1.1/32").has_value());
+    assert(!parse("239.69.1.1\xd9\xff/32").has_value());
+    assert(!parse("239.69.1.1\x7f/32").has_value());
+    assert(!parse("/32").has_value());
+
+    auto good = parse("239.69.1.1/32");
+    assert(good.has_value() && good->connectionAddress == "239.69.1.1");
+    auto noTtl = parse("239.69.1.1");
+    assert(noTtl.has_value() && noTtl->connectionAddress == "239.69.1.1");
+
+    // The fuzzer's input, as it was found
+    const std::string crash =
+        "v=0\r\no=- 1 1 IN IP4 10.0.0L16/90\ns=Riedel Art0 0\n"
+        "m=audio 5004 RTP\tAVP 96\na=rtpmap:96 L24/49000/8\n"
+        "c=IN IP4 2inac\xd9\xff" "01\x01\t/0/2";
+    assert(!SDPParser::parseString(crash).has_value());
+
+    std::cout << "PASSED\n";
+}
+
 void runAllTests() {
     std::cout << "\n=== AES67 SDP Parser Test Suite ===\n\n";
 
@@ -697,6 +736,7 @@ void runAllTests() {
     testControlCharactersRejected();
     testOnlyFirstAudioSection();
     testRepeatedSpaces();
+    testConnectionAddressToken();
     testInvalidSDP();
     testFileOperations();
 
