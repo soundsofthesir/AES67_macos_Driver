@@ -347,6 +347,28 @@ void testBufferReadWrite() {
     CHECK(partial[58 * 2] == 0.0f && partial[69 * 2 + 1] == 0.0f, "frames after the packet should be silence");
 }
 
+// #185: the writer learns how far playout has got from the furthest read
+void testBufferReportsFurthestRead() {
+    std::cout << "TimestampedAudioBuffer reports the furthest position read" << std::endl;
+
+    TimestampedAudioBuffer buffer(1, 256);
+    CHECK(buffer.readEnd() == TimestampedAudioBuffer::kNothingRead, "nothing has been read from a new buffer");
+
+    std::vector<float> out(64, 0.0f);
+    buffer.read(100, 50, out.data(), 1, 0);
+    CHECK(buffer.readEnd() == 150, "a read should report the position after its last frame (got " << buffer.readEnd() << ")");
+    buffer.read(20, 10, out.data(), 1, 0);
+    CHECK(buffer.readEnd() == 150, "an earlier read should not move it back (got " << buffer.readEnd() << ")");
+    buffer.read(150, 64, out.data(), 1, 0);
+    CHECK(buffer.readEnd() == 214, "a later read should advance it (got " << buffer.readEnd() << ")");
+    buffer.read(-500, 10, out.data(), 1, 0);
+    CHECK(buffer.readEnd() == 214, "a read at negative positions should not move it back");
+
+    TimestampedAudioBuffer negative(1, 256);
+    negative.read(-500, 10, out.data(), 1, 0);
+    CHECK(negative.readEnd() == -490, "negative positions are positions like any other (got " << negative.readEnd() << ")");
+}
+
 void testBufferWraparoundAndStaleLaps() {
     std::cout << "TimestampedAudioBuffer wraparound and stale laps" << std::endl;
 
@@ -565,6 +587,7 @@ int main() {
     testTimelineOrigin();
     testZeroTimeStamps();
     testBufferReadWrite();
+    testBufferReportsFurthestRead();
     testBufferWraparoundAndStaleLaps();
     testBufferStridedAccess();
     testBufferRejectsBadShape();

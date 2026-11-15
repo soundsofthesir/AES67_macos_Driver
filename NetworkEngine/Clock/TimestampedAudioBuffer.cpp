@@ -48,6 +48,13 @@ void TimestampedAudioBuffer::write(int64_t position, size_t frames, const float*
 
 size_t TimestampedAudioBuffer::read(int64_t position, size_t frames, float* dst, size_t dstStride,
                                     size_t dstFirstColumn) const noexcept {
+    // Published before copying: a packet written from here on that ends at or
+    // before `end` may already have been passed by this read
+    const int64_t end = position + static_cast<int64_t>(frames);
+    if (end > readEnd_.load(std::memory_order_relaxed)) {
+        readEnd_.store(end, std::memory_order_relaxed);
+    }
+
     size_t valid = 0;
     for (size_t f = 0; f < frames; ++f) {
         const int64_t framePosition = position + static_cast<int64_t>(f);

@@ -215,17 +215,20 @@ void sendRun(LoopbackSender& sender, SendPacer& pacer, uint16_t firstSeq, uint32
 // Placement drops and the sends the machine delayed, for failure messages
 std::string dropSummary(const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer) {
     std::ostringstream out;
-    out << "late drops " << stats.lateDrops << ", early drops " << stats.earlyDrops << ", " << pacer.lateSends()
-        << " sent late, worst " << pacer.maxBehindMs() << " ms behind";
+    out << "late drops " << stats.lateDrops << ", early drops " << stats.earlyDrops << ", missed playout "
+        << stats.missedPlayout << ", " << pacer.lateSends() << " sent late, worst " << pacer.maxBehindMs()
+        << " ms behind";
     return out.str();
 }
 
-// A send made late may arrive past its playout point and be dropped: each one
-// may cost one packet of tone, which becomes silence inside the heard region
-// or shortens it at either end. With no late sends every count is exact.
+// A send made late may arrive past its playout point and be dropped, and a
+// packet the receive thread wrote after playout had passed it is counted as
+// missedPlayout (#185): each one may cost one packet of tone, which becomes
+// silence inside the heard region or shortens it at either end. With neither,
+// every count is exact.
 void checkHeardRun(const std::vector<float>& region, size_t tonePackets, size_t silentPackets,
                    const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer, const char* what) {
-    const size_t late = pacer.lateSends();
+    const size_t late = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
     const size_t tone = countNear(region, 0.25f);
     const size_t silence = countNear(region, 0.0f);
     const size_t want = (tonePackets + silentPackets) * kFramesPerPacket;
@@ -2030,6 +2033,151 @@ void testOutageKeepsTimeline() {
 }
 
 // ---------------------------------------------------------------------------
+// #185: a packet that arrived on time but was written after the IO thread had
+// read its positions plays as silence. Placement judges it by its kernel
+// arrival time, so no drop counter sees it: missedPlayout must.
+//
+// The receive thread is stopped with thread_suspend while packets queue in
+// its socket and this thread plays the IO thread. Nothing is read between
+// resuming the receive thread and it writing the queued packets, so in a
+// stalled run every packet is exactly one of heard, counted or dropped.
+// ---------------------------------------------------------------------------
+std::vector<thread_act_t> taskThreads() {
+    thread_act_array_t list = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS) return {};
+    std::vector<thread_act_t> threads(list, list + count);
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(list), count * sizeof(thread_act_t));
+    return threads;
+}
+
+struct MissedPlayoutRun {
+    size_t wholePackets{0};    // heard in full
+    size_t partialSamples{0};  // of a packet the read point was inside when it was written
+    uint64_t received{0};
+    RTPReceiver::PlacementStatistics stats{};
+
+    // Packets of which nothing was heard
+    size_t unheard(size_t sent) const { return sent - wholePackets - (partialSamples > 0 ? 1 : 0); }
+    uint64_t accounted() const { return stats.missedPlayout + stats.lateDrops + stats.earlyDrops; }
+};
+
+MissedPlayoutRun runMissedPlayout(const char* group, uint16_t port, uint16_t packets, std::chrono::milliseconds stall,
+                                  bool reading) {
+    RxHarness harness;
+    const std::vector<thread_act_t> before = taskThreads();
+    RTPReceiver receiver(makeRxSDP(group, port, 2), makeMapping(2, 0), harness.context());
+    CHECK(receiver.start(), "receiver should start");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // The receiver's thread is the one start() created
+    std::vector<thread_act_t> receiveThreads;
+    for (thread_act_t thread : taskThreads()) {
+        if (std::find(before.begin(), before.end(), thread) == before.end()) receiveThreads.push_back(thread);
+    }
+    CHECK(!receiveThreads.empty(), "the receive thread should be found");
+
+    // Allocated before the receive thread is stopped
+    std::vector<float> heard;
+    heard.reserve(48000);
+    std::vector<float> frames(4096 * 128);
+    int64_t next = harness.readPositionNow();
+    const auto pump = [&] {
+        const int64_t target = harness.readPositionNow();
+        while (reading && next < target) {
+            const auto count = static_cast<size_t>(std::min<int64_t>(target - next, 4096));
+            std::fill(frames.begin(), frames.begin() + count * 128, 0.0f);
+            harness.routing.read([&](const RxRouting::Route& route) {
+                route.buffer->read(next, count, frames.data(), 128, route.deviceChannelStart);
+            });
+            for (size_t f = 0; f < count; ++f) heard.push_back(frames[f * 128]);
+            next += static_cast<int64_t>(count);
+        }
+    };
+
+    LoopbackSender sender(group, port);
+    AudioThreadPriority::configureForRealTime();
+    pump();
+    const bool stalled = stall.count() > 0;
+    if (stalled) {
+        for (thread_act_t thread : receiveThreads) thread_suspend(thread);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (uint16_t i = 0; i < packets; ++i) {
+        sender.sendL24(static_cast<uint16_t>(8000 + i), i * kFramesPerPacket, 2, 0.25f);
+        std::this_thread::sleep_until(start + std::chrono::milliseconds(i + 1));
+        pump();
+    }
+    if (stalled) {
+        std::this_thread::sleep_until(start + stall);
+        pump();
+        for (thread_act_t thread : receiveThreads) thread_resume(thread);
+    }
+    AudioThreadPriority::restoreNormalPriority();
+
+    MissedPlayoutRun run;
+    // No reads until the queued packets are written
+    TestWait::waitUntil([&] { return receiver.getStatistics().packetsReceived >= packets; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // let playout pass the last packet
+    pump();
+
+    run.received = receiver.getStatistics().packetsReceived;
+    run.stats = receiver.getPlacementStatistics();
+    receiver.stop();
+    for (thread_act_t thread : receiveThreads) mach_port_deallocate(mach_task_self(), thread);
+
+    const size_t tone = countNear(heard, 0.25f);
+    run.wholePackets = tone / kFramesPerPacket;
+    run.partialSamples = tone % kFramesPerPacket;
+    return run;
+}
+
+std::string missedPlayoutSummary(const MissedPlayoutRun& run, uint16_t packets) {
+    std::ostringstream out;
+    out << run.wholePackets << " of " << packets << " packets heard in full, " << run.partialSamples
+        << " samples of another, missed playout " << run.stats.missedPlayout << ", late drops " << run.stats.lateDrops
+        << ", early drops " << run.stats.earlyDrops << ", " << run.received << " received";
+    return out.str();
+}
+
+void testMissedPlayoutIsCounted() {
+    std::cout << "#185: RX packets written after playout passed them are counted" << std::endl;
+
+    constexpr uint16_t kPackets = 30;
+
+    // Receive thread stopped for the whole 30 ms run, 8 ms link offset: about
+    // the first 22 packets are written behind the read point
+    const MissedPlayoutRun stalled =
+        runMissedPlayout("239.69.99.210", 55310, kPackets, std::chrono::milliseconds(30), true);
+    std::cout << "  30 ms stall: " << missedPlayoutSummary(stalled, kPackets) << std::endl;
+    CHECK(stalled.received == kPackets, "every packet should be received after the stall (got " << stalled.received << ")");
+    CHECK(stalled.stats.missedPlayout > 0 && stalled.accounted() >= kPackets / 2,
+          "a 30 ms stall should put most of the run behind playout (" << missedPlayoutSummary(stalled, kPackets) << ")");
+    CHECK(stalled.accounted() == stalled.unheard(kPackets),
+          "every packet not heard should be counted, and no other (" << stalled.unheard(kPackets) << " not heard; "
+              << missedPlayoutSummary(stalled, kPackets) << ")");
+
+    // No stall: nothing heard may be counted, so a run heard in full counts 0.
+    // The machine may still hold the receive thread back, which is what the
+    // counter is for; those packets are not heard.
+    const MissedPlayoutRun quiet = runMissedPlayout("239.69.99.211", 55312, kPackets, std::chrono::milliseconds(0), true);
+    std::cout << "  no stall: " << missedPlayoutSummary(quiet, kPackets) << std::endl;
+    CHECK(quiet.received == kPackets, "every packet should be received (got " << quiet.received << ")");
+    CHECK(quiet.accounted() + quiet.wholePackets <= kPackets,
+          "no packet that was heard should be counted (" << missedPlayoutSummary(quiet, kPackets) << ")");
+    CHECK(quiet.wholePackets + (quiet.partialSamples > 0 ? 1 : 0) + quiet.accounted() >= kPackets,
+          "every packet not heard should be counted (" << missedPlayoutSummary(quiet, kPackets) << ")");
+
+    // Nothing reading: playout has passed nothing, however long the stall
+    const MissedPlayoutRun unread =
+        runMissedPlayout("239.69.99.212", 55314, kPackets, std::chrono::milliseconds(30), false);
+    std::cout << "  30 ms stall, nothing reading: " << missedPlayoutSummary(unread, kPackets) << std::endl;
+    CHECK(unread.received == kPackets && unread.stats.missedPlayout == 0,
+          "packets written before the first read should never be counted (" << missedPlayoutSummary(unread, kPackets)
+                                                                           << ")");
+}
+
+// ---------------------------------------------------------------------------
 // #137: the IO thread reads a whole Core Audio buffer whose start can be one
 // IO period behind now. A 4096-frame read therefore spans about
 // ioBuf + 2 * linkOffset frames; the old 4096-frame ring lost its oldest
@@ -2325,6 +2473,7 @@ int main() {
     testInterleavedSecondSourceIsIgnored();
     testRestartBehindPlayoutIsFollowed();
     testOutageKeepsTimeline();
+    testMissedPlayoutIsCounted();
     testLargeIoBufferReadsTheWholeCycle();
 
     std::cout << "\nCritical path regressions: " << checksPassed << " passed, "

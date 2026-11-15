@@ -146,6 +146,7 @@ bool RTPReceiver::startStreaming() {
     placement_ = std::make_unique<RtpPlacement>(placementConfig, context_.networkTime);
     lastClockGeneration_ = 0;
     lastPacket_ = LastPacket{};
+    missedPlayout_.store(0, std::memory_order_relaxed);
     decodeBuffer_.assign(kMaxFramesPerPacket * sdp_.numChannels, 0.0f);
 
     if (!context_.routing.publish(buffer_.get(), static_cast<uint32_t>(mapping_.deviceChannelStart))) {
@@ -218,7 +219,8 @@ StatisticsSnapshot RTPReceiver::getStatistics() const {
 
 RTPReceiver::PlacementStatistics RTPReceiver::getPlacementStatistics() const {
     return {lateDrops_.load(std::memory_order_relaxed), earlyDrops_.load(std::memory_order_relaxed),
-            foreignDrops_.load(std::memory_order_relaxed), reanchors_.load(std::memory_order_relaxed)};
+            foreignDrops_.load(std::memory_order_relaxed), missedPlayout_.load(std::memory_order_relaxed),
+            reanchors_.load(std::memory_order_relaxed)};
 }
 
 void RTPReceiver::resetStatistics() {
@@ -412,6 +414,13 @@ void RTPReceiver::processPacket(const RTP::RTPPacket& packet, uint64_t arrivalHo
     }
 
     if (decode(packet.payload, packet.payloadSize) == frames) {
+        // Placement judged the packet by when it arrived. If this thread was
+        // kept off the CPU since then, the IO thread may already have read
+        // these positions as silence: count it (#185). Still written, so a
+        // reader that is behind the furthest one can use it.
+        if (placed.position + static_cast<int64_t>(frames) <= buffer_->readEnd()) {
+            missedPlayout_.fetch_add(1, std::memory_order_relaxed);
+        }
         buffer_->write(placed.position, frames, decodeBuffer_.data(), sdp_.numChannels, 0);
     }
 }
