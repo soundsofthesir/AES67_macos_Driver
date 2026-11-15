@@ -35,6 +35,28 @@ std::optional<uint64_t> decimal(const std::string& text, uint64_t max) {
     return value;
 }
 
+/// Whether `text` can be an address field: printable ASCII with no
+/// whitespace (RFC 4566 unicast-address and multicast-address are made of
+/// these). Fields are trimmed before they are split at '/', so a control
+/// byte or tab left at the end of an address would be written back by
+/// generate() and trimmed off by the next parse (#190).
+bool isAddressToken(const std::string& text) {
+    if (text.empty()) return false;
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte < 0x21 || byte > 0x7e) return false;
+    }
+    return true;
+}
+
+/// Whether the c= address is IPv4 multicast (224.0.0.0 to 239.255.255.255).
+/// Only the first octet decides; the address is not otherwise checked here.
+bool isIPv4Multicast(const SDPSession& session) {
+    if (session.connectionNetwork != "IP4") return false;
+    const auto octet = decimal(session.connectionAddress.substr(0, session.connectionAddress.find('.')), 255);
+    return octet && *octet >= 224 && *octet <= 239;
+}
+
 /// The first number of SDP's "<port>/<count>" and "<ttl>/<count>" forms.
 std::string beforeSlash(const std::string& text) {
     return text.substr(0, text.find('/'));
@@ -279,7 +301,7 @@ bool SDPParser::parseConnectionLine(const std::string& line, SDPSession& session
         session.connectionAddress = addrPart;
     }
 
-    return true;
+    return isAddressToken(session.connectionAddress);
 }
 
 bool SDPParser::parseTimingLine(const std::string& line, SDPSession& session) {
@@ -543,7 +565,10 @@ std::string SDPParser::generateConnectionLine(const SDPSession& session) {
          << " " << session.connectionNetwork
          << " " << session.connectionAddress;
 
-    if (session.ttl != 0) {
+    // RFC 4566 5.7: an IPv4 multicast address carries its TTL, and a unicast
+    // one does not. TTL 0 is written too: a reader that sees no TTL uses 32,
+    // so a host-only stream would come back sending onto the network.
+    if (isIPv4Multicast(session)) {
         line << "/" << static_cast<int>(session.ttl);
     }
 

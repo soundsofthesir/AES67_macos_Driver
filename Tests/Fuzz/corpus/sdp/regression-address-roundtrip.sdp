@@ -1,0 +1,13 @@
+v=0
+o=- 1 1 IN IP4 10.0.0L16/90
+s=Riedel Art0 0
+a=”lo
+a=lyÿ
+m=audio 5004 RTP	AVP 96
+<ÿÿÿÿÿÿÿ<<<ptime00
+a=t48
+ats-r:¢71/32
+a=rtpmap:96 L24/49000/8
+a=<<<<ptime00Š
+]a=t:4s
+c=IN IP4 2inacÙÿ01	/0/2
