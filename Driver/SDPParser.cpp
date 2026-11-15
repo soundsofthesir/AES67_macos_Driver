@@ -49,6 +49,14 @@ bool isAddressToken(const std::string& text) {
     return true;
 }
 
+/// Whether the c= address is IPv4 multicast (224.0.0.0 to 239.255.255.255).
+/// Only the first octet decides; the address is not otherwise checked here.
+bool isIPv4Multicast(const SDPSession& session) {
+    if (session.connectionNetwork != "IP4") return false;
+    const auto octet = decimal(session.connectionAddress.substr(0, session.connectionAddress.find('.')), 255);
+    return octet && *octet >= 224 && *octet <= 239;
+}
+
 /// The first number of SDP's "<port>/<count>" and "<ttl>/<count>" forms.
 std::string beforeSlash(const std::string& text) {
     return text.substr(0, text.find('/'));
@@ -557,7 +565,10 @@ std::string SDPParser::generateConnectionLine(const SDPSession& session) {
          << " " << session.connectionNetwork
          << " " << session.connectionAddress;
 
-    if (session.ttl != 0) {
+    // RFC 4566 5.7: an IPv4 multicast address carries its TTL, and a unicast
+    // one does not. TTL 0 is written too: a reader that sees no TTL uses 32,
+    // so a host-only stream would come back sending onto the network.
+    if (isIPv4Multicast(session)) {
         line << "/" << static_cast<int>(session.ttl);
     }
 

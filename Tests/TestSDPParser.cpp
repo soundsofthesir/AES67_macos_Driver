@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 // These tests check with assert(). Release builds define NDEBUG, which would
@@ -716,6 +717,45 @@ void testConnectionAddressToken() {
     std::cout << "PASSED\n";
 }
 
+// generate() left out "/0", and a c= line without a TTL parses as 32, so a
+// host-only TTL 0 stream exported and imported again would reach the network
+void testTtlRoundTrip() {
+    std::cout << "Test: c= TTL survives generate and parse... ";
+
+    auto roundTrip = [](const SDPSession& session) {
+        const std::string text = SDPParser::generate(session);
+        auto reparsed = SDPParser::parseString(text);
+        assert(reparsed.has_value());
+        return std::make_pair(text, *reparsed);
+    };
+
+    SDPSession session = SDPParser::createDefaultTxSession("Host only", "10.0.0.5", "239.69.1.1", 5004, 2, 48000);
+    for (const int ttl : {0, 1, 32, 255}) {
+        session.ttl = static_cast<uint8_t>(ttl);
+        const auto [text, reparsed] = roundTrip(session);
+        assert(text.find("c=IN IP4 239.69.1.1/" + std::to_string(ttl) + "\r\n") != std::string::npos);
+        assert(reparsed.ttl == ttl);
+    }
+
+    // The ends of the multicast range
+    session.ttl = 0;
+    session.connectionAddress = "224.0.0.1";
+    assert(roundTrip(session).second.ttl == 0);
+    session.connectionAddress = "239.255.255.255";
+    assert(roundTrip(session).second.ttl == 0);
+
+    // A unicast address has no TTL (RFC 4566 5.7)
+    for (const char* unicast : {"10.0.0.9", "223.255.255.255", "240.0.0.1"}) {
+        session.connectionAddress = unicast;
+        session.ttl = 0;
+        const auto [text, reparsed] = roundTrip(session);
+        assert(text.find("c=IN IP4 " + std::string(unicast) + "\r\n") != std::string::npos);
+        assert(reparsed.connectionAddress == unicast);
+    }
+
+    std::cout << "PASSED\n";
+}
+
 void runAllTests() {
     std::cout << "\n=== AES67 SDP Parser Test Suite ===\n\n";
 
@@ -737,6 +777,7 @@ void runAllTests() {
     testOnlyFirstAudioSection();
     testRepeatedSpaces();
     testConnectionAddressToken();
+    testTtlRoundTrip();
     testInvalidSDP();
     testFileOperations();
 
