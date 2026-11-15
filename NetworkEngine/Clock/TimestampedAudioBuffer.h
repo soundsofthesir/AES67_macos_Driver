@@ -52,6 +52,15 @@ public:
     size_t read(int64_t position, size_t frames, float* dst, size_t dstStride,
                 size_t dstFirstColumn) const noexcept;
 
+    /// readEnd() before any read.
+    static constexpr int64_t kNothingRead = INT64_MIN;
+
+    /// One past the furthest position any read has covered, or kNothingRead.
+    /// A writer can compare a packet's end against it to learn that playout
+    /// has already passed that audio (#185). Relaxed: a diagnostic, exact
+    /// except while a read and a write of the same positions overlap.
+    int64_t readEnd() const noexcept { return readEnd_.load(std::memory_order_relaxed); }
+
 private:
     static constexpr int64_t kEmpty = INT64_MIN;
 
@@ -64,6 +73,10 @@ private:
     const uint64_t mask_;
     std::unique_ptr<std::atomic<float>[]> samples_;  // capacity_ * channels_, slot-major
     std::unique_ptr<std::atomic<int64_t>[]> tags_;   // position held by each slot
+
+    // Written by readers, read by the writer. On its own cache line so a
+    // reader's store does not invalidate the fields above for the writer.
+    alignas(64) mutable std::atomic<int64_t> readEnd_{kNothingRead};
 };
 
 } // namespace AES67
