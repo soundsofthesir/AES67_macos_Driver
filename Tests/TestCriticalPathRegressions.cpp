@@ -223,17 +223,17 @@ std::string dropSummary(const RTPReceiver::PlacementStatistics& stats, const Sen
 
 // A send made late may arrive past its playout point and be dropped, and a
 // packet the receive thread wrote after playout had passed it is counted as
-// missedPlayout (#185): each one may cost one packet of tone, which becomes
-// silence inside the heard region or shortens it at either end. With neither,
-// every count is exact.
+// missedPlayout (#185): each one may cost up to one packet of tone, which
+// becomes silence inside the heard region or shortens it at either end. A
+// packet that arrives while its playout passes is heard in part, so the
+// counts need not be whole packets. With neither, every count is exact.
 void checkHeardRun(const std::vector<float>& region, size_t tonePackets, size_t silentPackets,
                    const RTPReceiver::PlacementStatistics& stats, const SendPacer& pacer, const char* what) {
     const size_t late = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
     const size_t tone = countNear(region, 0.25f);
     const size_t silence = countNear(region, 0.0f);
     const size_t want = (tonePackets + silentPackets) * kFramesPerPacket;
-    const bool whole = tone % kFramesPerPacket == 0 && silence % kFramesPerPacket == 0;
-    CHECK(whole && tone <= tonePackets * kFramesPerPacket && tone + late * kFramesPerPacket >= tonePackets * kFramesPerPacket,
+    CHECK(tone <= tonePackets * kFramesPerPacket && tone + late * kFramesPerPacket >= tonePackets * kFramesPerPacket,
           "every received packet should be played (got " << tone << " of " << tonePackets * kFramesPerPacket
                                                          << " samples; " << dropSummary(stats, pacer) << ")");
     CHECK(region.size() <= want && region.size() + late * kFramesPerPacket >= want,
@@ -1959,8 +1959,9 @@ void testLatePacketIsIgnored() {
 
     // The packet sent 400 packets late is itself one late drop. Beyond it,
     // only a send the machine delayed may cost up to a packet of tone: dropped
-    // past its playout point, or heard in part when it arrives as playout passes.
-    const size_t late = pacer.lateSends();
+    // past its playout point, or heard in part when it arrives as playout
+    // passes. So may a packet counted as missedPlayout (#185).
+    const size_t late = pacer.lateSends() + static_cast<size_t>(stats.missedPlayout);
     const size_t tone = countNear(region, 0.25f);
     const size_t silence = countNear(region, 0.0f);
     const size_t want = static_cast<size_t>(kPackets) * kFramesPerPacket;
