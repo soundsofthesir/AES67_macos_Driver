@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Experimental.** Updated 4 October 2026.
+> **Experimental.** Updated 29 October 2026.
 
 A free, open-source AES67 driver for the Mac. The goal is to get a console's network audio onto a Mac without a licence, and to send the Mac's apps back out to the network as separate streams.
 
@@ -11,9 +11,9 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 | Area | Status | Notes |
 |---|---|---|
 | Receive | Working | Tested in Core Audio with test streams. Fixed 8 ms latency. The device clock locks to the incoming stream and rides out short network stalls. |
-| Transmit | Needs PTP | Sends continuously on the device clock and announces streams over SAP. Dante and RAVENNA devices can see the streams but won't play them until PTP lands. |
-| PTP | In progress | With `ptp.json` turning it on (off by default), the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Tested on loopback against test masters; a real network is next. Tracked in [#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21). |
-| Manager app | Planned | Builds and runs, but doesn't control the driver yet. Streams are set in `streams.json`. |
+| Transmit | Needs a real network | Sends continuously on the device clock (or PTP time) and announces streams over SAP. Tested on this Mac only; no Dante, RAVENNA or other receiver has played the streams yet. |
+| PTP | Built, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Holdover and recovery after the grandmaster goes quiet are in. Tested on loopback against test masters; a real network is next ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
+| Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set in `streams.json`. |
 | Install | Planned | Build from source only, with Homebrew and CMake. No downloadable installer yet. |
 
 ## Steps
@@ -27,7 +27,7 @@ Follow a PTP grandmaster on the network and timestamp sent audio against it. The
 - Dante and RAVENNA devices play streams sent from the Mac.
 - Several senders stay in sync with each other.
 
-Issues [#21](https://github.com/maxajbarlow/AES67_macos_Driver/issues/21), [#23](https://github.com/maxajbarlow/AES67_macos_Driver/issues/23). The design is in the [step 2 plan](Step2-Clocking-Plan.md).
+Issues [#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21), [#28](https://github.com/soundsofthesir/AES67_macos_Driver/issues/28). The design is in the [step 2 plan](Step2-Clocking-Plan.md).
 
 ### 2. Signed installer (planned)
 
@@ -66,9 +66,9 @@ When no PTP grandmaster is present, the Mac provides the clock itself. That allo
 ## Alongside the steps
 
 - **Compatibility list.** A public table of tested devices, firmware versions and results, filled in from testers' reports.
-- **Network input hardening.** The driver reads stream announcements from any device on the network inside the Mac's audio system. Those parsers will be fuzz-tested so a malformed packet can't take down audio.
-- **Smaller fixes.** Fractional packet times such as 0.125 ms ([#22](https://github.com/maxajbarlow/AES67_macos_Driver/issues/22)), stream descriptions without a channel count ([#24](https://github.com/maxajbarlow/AES67_macos_Driver/issues/24)), and transmit stalls while no app uses the device ([#25](https://github.com/maxajbarlow/AES67_macos_Driver/issues/25)).
-- **Resampling (optional).** For senders that run on a different clock and can't follow PTP.
+- **Network input hardening.** The driver reads stream announcements, RTP and PTP packets from any device on the network inside the Mac's audio system. The SDP, RTP and PTP parsers now refuse malformed fields; fuzz testing is next.
+- **Smaller fixes.** Transmit stalls while no app uses the device ([#25](https://github.com/soundsofthesir/AES67_macos_Driver/issues/25)), DSCP marking for PTP and RTP ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)), and checking a stream's clock against the grandmaster ([#49](https://github.com/soundsofthesir/AES67_macos_Driver/issues/49)).
+- **Resampling (optional).** For senders that run on a different clock and can't follow PTP ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 
 ## Not planned for now
 
