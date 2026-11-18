@@ -6,37 +6,44 @@ An open-source AES67 network audio driver for macOS. It runs as a user-space Cor
 
 ## Status
 
+**Tested with real hardware (Riedel Artist intercom, 18 November 2026):**
+
+- Receiving a 1-channel L24 stream from Riedel gear, with no packet loss over 10 minutes.
+- Sending a 1-channel L24 stream that Artist plays.
+- PTP on a real network. The driver locks to the grandmaster in about 10 seconds, with unicast Delay_Req (`"hybrid": true`).
+
+These were short runs, about 15 minutes. Stereo and 8-channel streams, runs of several hours and grandmaster changes haven't been tried on hardware yet.
+
 **Works today (tested in Core Audio with test streams):**
 
 - Receives AES67 streams at a fixed 8 ms latency. Streams from senders on the same clock stay sample-aligned, and several apps can record at once.
 - Locks its clock to the incoming stream, so a sender running fast or slow doesn't cause dropouts.
 - Rides out short network stalls without losing sync.
+- Sends AES67 streams continuously, on the device clock or PTP time, and announces them over SAP.
 
 **Built and tested, not yet tried in Core Audio:**
 
-- Sending AES67 streams, continuously and on the device clock.
-- Announcing sent streams over SAP.
 - Rejoining streams after a network change (new IP address, Wi-Fi roam, cable replug).
 - Returning an error instead of terminating coreaudiod when a Core Audio callback hits a C++ exception, such as a failed allocation. A start that fails partway is rolled back.
 
-**Built and tested on loopback only, off by default:**
-
-- PTP. With `ptp.json` turning it on (see [Configuration](#configuration)), the driver follows a PTP grandmaster. The device clock runs on PTP time, received audio is placed by it, and sent streams are stamped with it and name the grandmaster in their SAP announcements. Tested against scripted masters on the same Mac, not yet on a real network ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)).
+PTP is off by default. With `ptp.json` turning it on (see [Configuration](#configuration)), the device clock runs on PTP time, received audio is placed by it, and sent streams are stamped with it and name the grandmaster in their SAP announcements.
 
 **Not done yet:**
 
-- Sending to Dante, RAVENNA or other AES67 receivers. The driver's sent streams haven't been played by any of them yet.
-- Long tests with real hardware. An earlier version received audio from a hardware AES67 device; the rebuilt version hasn't been tried with one yet.
+- Sending to Dante or RAVENNA receivers.
+- Long tests with real hardware.
 
 Progress is tracked in the [step 2 plan](Docs/Step2-Clocking-Plan.md).
 
 ## Roadmap
 
-Next up is trying PTP and sending on a real network with Dante, RAVENNA and other AES67 gear, then a signed installer, a Manager app that controls the driver, and per-app routing. See the [roadmap](Docs/Roadmap.md) for the full order and how to help.
+Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), then a signed installer, a Manager app that controls the driver, and per-app routing. See the [roadmap](Docs/Roadmap.md) for the full order and how to help.
 
 ## Known limitations
 
-- PTP is off by default and untested on a real network.
+- PTP is off by default.
+- Don't bridge the AES67 interface, for example with Internet Sharing. While the interface is in a bridge, macOS doesn't answer the switch's IGMP queries, so a snooping switch stops forwarding PTP and audio groups about 4 minutes after the driver joins them. PTP lock is lost and receivers drop the Mac's audio ([#197](https://github.com/soundsofthesir/AES67_macos_Driver/issues/197)).
+- Sent packets aren't DSCP-marked yet ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)).
 - Without PTP the driver follows one sender's clock, and a second sender on a different clock drifts and occasionally resyncs. With PTP the same goes for any sender that isn't on the grandmaster ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 - Received packets that arrive more than 8 ms late play as silence. So do packets that arrive on time but that the receive thread writes after Core Audio has read past them, which happens when the thread is held off the CPU. The driver counts these per stream but doesn't report the count anywhere yet.
 - The Manager app doesn't control the driver yet.
