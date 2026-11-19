@@ -24,11 +24,28 @@ fi
 # The driver runs as _coreaudiod and saves streams.json by writing a temp
 # file here and renaming it over the old one, so it must own the directory
 # (#42). Set on every install: older installers made it root-owned.
-mkdir -p "$CONFIG_DIR" || log "WARNING: Failed to create $CONFIG_DIR"
-if chown _coreaudiod:wheel "$CONFIG_DIR" && chmod 755 "$CONFIG_DIR"; then
+# A symlink here would make chown/chmod change an unintended path as root
+# (#161), so replace it with a real directory. rm without -r removes the link
+# itself and never the path it points to.
+if [ -L "$CONFIG_DIR" ]; then
+    log "Replacing symbolic link at $CONFIG_DIR with a directory"
+    if ! rm -f "$CONFIG_DIR"; then
+        log "ERROR: Failed to remove symbolic link $CONFIG_DIR; stream changes won't be saved"
+        exit 1
+    fi
+fi
+if ! mkdir -p "$CONFIG_DIR"; then
+    log "ERROR: Failed to create $CONFIG_DIR; stream changes won't be saved"
+    exit 1
+fi
+# Check the result, not just chown/chmod's exit status: a failed package must
+# not report success (#161).
+if chown _coreaudiod:wheel "$CONFIG_DIR" && chmod 755 "$CONFIG_DIR" \
+    && [ "$(stat -f '%Su:%Sg %Lp' "$CONFIG_DIR")" = "_coreaudiod:wheel 755" ]; then
     log "Configuration directory: $CONFIG_DIR (owner _coreaudiod)"
 else
-    log "WARNING: Failed to give the driver its configuration directory; stream changes won't be saved"
+    log "ERROR: Failed to give the driver its configuration directory; stream changes won't be saved"
+    exit 1
 fi
 
 chown -R root:wheel "$DRIVER_PATH" || log "WARNING: Failed to set driver ownership"
