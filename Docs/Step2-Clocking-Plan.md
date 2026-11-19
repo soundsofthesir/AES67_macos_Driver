@@ -367,7 +367,7 @@ marcnnn's fork (`feat/aes67-wing-interop`, 33 commits, September 2026) was revie
 - **Software timestamp asymmetry biases phase.** Mitigation: minimum-delay filtering, a calibration offset, and a generous default link offset.
 - **Other PTP software on the same Mac** (another AoIP driver) contends for ports 319/320. Mitigation: `SO_REUSEPORT` and a documented limitation.
 - **Sample rate changes mid-stream.** Mitigation: rebase `mediaBase`, flush buffers, bump the seed.
-- **Background timer coalescing delays continuous TX.** With no client running, coreaudiod's timers may be coalesced by up to 100 ms (measured by marcnnn as 15-37 ms send stalls). Mitigation: measure in the real HAL; if needed, leave the Darwin background class only while a TX stream exists.
+- **Background timer coalescing delays continuous TX.** Measured in the real HAL (#201): with no client running IO, Core Audio puts the driver's host process at priority 4 and the transmit thread loses its time-constraint scheduling, so mach_wait_until wakes 30-100 ms late and only about 50 of 1000 packets a second went out. The process can't leave that band itself (task role, QoS override, PRIO_DARWIN_PROCESS and an NSProcessInfo latency-critical activity all had no effect). The transmit thread now waits on a NOTE_CRITICAL kqueue timer, which the kernel doesn't coalesce: idle sending is 970-995 packets a second. The rest comes from running at priority 4 and needs an IO client to remove.
 - **Scope.** This is the largest change in the project. Mitigation: phased PRs, each independently shippable, with deterministic virtual-time tests so timing does not make the suite flaky.
 
 ## Decisions needed

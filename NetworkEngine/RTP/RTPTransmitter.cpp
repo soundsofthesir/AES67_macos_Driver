@@ -6,6 +6,7 @@
 
 #include "RTPTransmitter.h"
 #include "SimpleRTP.h"
+#include "CriticalWait.h"
 #include "../../Driver/DebugLog.h"
 #include "../Clock/HostTime.h"
 #include "../NetworkInterfaceDetection.h"
@@ -194,11 +195,12 @@ void RTPTransmitter::transmitLoop() {
     uint32_t rtpOffset = 0;   // RTP timestamp = position + rtpOffset (mod 2^32), without PTP
     bool onPtp = false;
     const uint32_t mediaClockOffset = parseMediaClockOffset(sdp_.mediaClockType);
+    CriticalWait wait;
 
     while (running_) {
         const MediaClock::Snapshot clock = context_.clock.snapshot();
         if (!clock.valid()) {
-            mach_wait_until(hostTimeNow() + pollTicks);
+            wait.until(hostTimeNow() + pollTicks);
             continue;
         }
 
@@ -219,7 +221,7 @@ void RTPTransmitter::transmitLoop() {
         const uint64_t due = clock.hostAt(position + frames);
         const uint64_t now = hostTimeNow();
         if (due > now) {
-            mach_wait_until(std::min(due, now + pollTicks));
+            wait.until(std::min(due, now + pollTicks));
             continue;
         }
 
