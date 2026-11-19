@@ -21,30 +21,15 @@ OUTPUT_DIR="$INSTALLER_DIR/output"
 PAYLOAD_DIR="$INSTALLER_DIR/payload"
 SCRIPTS_DIR="$INSTALLER_DIR/scripts"
 
-# --build flag: build missing artifacts before packaging
+# --build flag: bring the driver, aes67ctl and the Manager app up to date
+# before packaging. Always rebuild (incrementally) so a stale binary never
+# ships, for example an aes67ctl without the keepalive command (#201).
 if [ "$1" = "--build" ]; then
-    echo "Auto-building artifacts..."
+    echo "Building artifacts..."
+    cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$BUILD_DIR" --target AES67Driver aes67ctl
+    (cd "$PROJECT_ROOT/ManagerApp" && ./build.sh)
     echo ""
-
-    if [ ! -d "$BUILD_DIR/AES67Driver.driver" ]; then
-        echo "Building driver..."
-        mkdir -p "$BUILD_DIR"
-        (cd "$BUILD_DIR" && cmake .. -DCMAKE_BUILD_TYPE=Release && make AES67Driver)
-        echo ""
-    fi
-
-    if [ ! -x "$BUILD_DIR/aes67ctl" ]; then
-        echo "Building aes67ctl..."
-        cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
-        cmake --build "$BUILD_DIR" --target aes67ctl
-        echo ""
-    fi
-
-    if [ ! -d "$PROJECT_ROOT/ManagerApp/AES67Manager.app" ]; then
-        echo "Building Manager app..."
-        (cd "$PROJECT_ROOT/ManagerApp" && ./build.sh)
-        echo ""
-    fi
 fi
 
 # Package info
