@@ -130,6 +130,7 @@ private:
     void updatePathDelay();
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
     bool negativeBias() const;  // the median of recent errors is well below the line
+    bool negativeDelayStepEvidence() const;  // Delay_Req residuals also moved down, ruling out Sync queueing
     void judgeLock();
 
     const Config config_;
