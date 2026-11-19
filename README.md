@@ -118,7 +118,7 @@ Running `setup` again with the same group replaces that stream; other streams st
 |---|---|
 | `aes67ctl status` | PTP lock since Core Audio started, then packets per second and peak level on each stream's group. It only listens. |
 | `aes67ctl list` | The configured streams and their device channels. |
-| `sudo aes67ctl add send\|receive <group> --interface en0` | Adds one stream. `--first-channel` and `--channels` place it. |
+| `sudo aes67ctl add send\|receive <group> --interface en0` | Adds one stream. `--channels` sets its size (default 2). It goes on the first free device channels in its direction, or from `--first-channel` if given. |
 | `sudo aes67ctl remove <group>` | Removes the streams on a group. |
 | `sudo aes67ctl restart` | Restarts Core Audio so the driver reads its files again. |
 

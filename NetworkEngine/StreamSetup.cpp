@@ -2,6 +2,7 @@
 /// @brief Builds and merges streams.json entries.
 
 #include "StreamSetup.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <random>
 
@@ -150,6 +151,28 @@ std::optional<std::vector<SavedStreamEntry>> addStream(const std::vector<SavedSt
     }
     result.push_back(added);
     return result;
+}
+
+std::optional<uint16_t> firstFreeChannel(const std::vector<SavedStreamEntry>& existing,
+                                         const StreamRequest& request) {
+    const bool send = request.direction == Direction::Send;
+    std::vector<bool> used(StreamChannelMapper::kMaxDeviceChannels, false);
+    for (const auto& entry : existing) {
+        if (!entry.config || !entry.config->enabled) continue;
+        if ((directionOf(entry) == Direction::Send) != send) continue;
+        if (entry.config->sdp.connectionAddress == request.group && entry.config->sdp.port == request.port) {
+            continue;  // the entry this request replaces
+        }
+        const size_t first = entry.config->mapping.deviceChannelStart;
+        const size_t end = std::min(used.size(), first + entry.config->sdp.numChannels);
+        for (size_t channel = first; channel < end; ++channel) used[channel] = true;
+    }
+    size_t run = 0;
+    for (size_t channel = 0; channel < used.size(); ++channel) {
+        run = used[channel] ? 0 : run + 1;
+        if (run == request.channels) return static_cast<uint16_t>(channel + 1 - run);
+    }
+    return std::nullopt;
 }
 
 std::vector<SavedStreamEntry> removeStreams(const std::vector<SavedStreamEntry>& existing,

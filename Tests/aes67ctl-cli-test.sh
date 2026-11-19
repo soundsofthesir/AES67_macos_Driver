@@ -19,10 +19,10 @@ out="$("$CTL" list)"
 check "list shows the send stream on outputs 1-2" 'grep -q "send     239.69.250.2:5004  2 ch  outputs 1-2  lo0" <<<"$out"'
 check "list shows the receive stream on input 1" 'grep -q "receive  239.69.250.1:5004  1 ch  inputs 1  lo0" <<<"$out"'
 
-"$CTL" add send 239.69.250.3 --interface lo0 --no-restart 2>"$DIR/err" >/dev/null
+"$CTL" add send 239.69.250.3 --interface lo0 --first-channel 1 --no-restart 2>"$DIR/err" >/dev/null
 check "a clashing send stream is refused" '[ $? -eq 1 ] && grep -q "device channels 1-2" "$DIR/err"'
-"$CTL" add send 239.69.250.3 --interface lo0 --first-channel 3 --no-restart >/dev/null
-check "outputs 3-4 are free" '[ $? -eq 0 ]'
+"$CTL" add send 239.69.250.3 --interface lo0 --no-restart >/dev/null
+check "without --first-channel a stream goes on the first free channels" '[ $? -eq 0 ] && "$CTL" list | grep -q "send     239.69.250.3:5004  2 ch  outputs 3-4  lo0"'
 
 "$CTL" add send 239.69.250.2 --interface lo0 --channels 1 --no-restart >/dev/null
 check "the same group replaces its stream" '[ "$("$CTL" list | grep -c 239.69.250.2)" -eq 1 ] && "$CTL" list | grep -q "239.69.250.2:5004  1 ch"'

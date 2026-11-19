@@ -56,7 +56,8 @@ const char* kUsageText = R"(usage:
   aes67ctl keepalive
 
 Channels are 1-based in output: a 2-channel send stream from channel 1
-carries the Mac's stereo output.
+carries the Mac's stereo output. Without --first-channel, add places the
+stream on the first free channels in its direction.
 )";
 
 struct Args {
@@ -421,7 +422,17 @@ int add(const Args& args) {
     if (needsRoot()) return kFailed;
 
     auto entries = loadStreams();
-    if (!entries || !addTo(*entries, request) || !saveStreams(*entries)) return kFailed;
+    if (!entries) return kFailed;
+    if (args.value("--first-channel").empty()) {
+        const auto free = Setup::firstFreeChannel(*entries, request);
+        if (!free) {
+            std::cerr << "no " << request.channels << " free device "
+                      << (direction == Setup::Direction::Send ? "outputs" : "inputs") << " in a row" << std::endl;
+            return kFailed;
+        }
+        request.firstDeviceChannel = *free;
+    }
+    if (!addTo(*entries, request) || !saveStreams(*entries)) return kFailed;
     return args.has("--no-restart") || restartAndWait() ? kOk : kFailed;
 }
 

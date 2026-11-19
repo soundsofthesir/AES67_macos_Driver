@@ -49,6 +49,12 @@ std::optional<std::vector<SavedStreamEntry>> addStream(const std::vector<SavedSt
                                                        const PersistedStreamConfig& stream,
                                                        std::string* error);
 
+/// The lowest device channel (0-based) from which `request.channels`
+/// channels are free in `request`'s direction, ignoring the entry `request`
+/// would replace and disabled entries. nullopt if no such run is left.
+std::optional<uint16_t> firstFreeChannel(const std::vector<SavedStreamEntry>& existing,
+                                         const StreamRequest& request);
+
 /// `existing` without the entries on `group` (any port, both directions).
 /// `removed` counts them.
 std::vector<SavedStreamEntry> removeStreams(const std::vector<SavedStreamEntry>& existing,
