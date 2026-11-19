@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Experimental.** Updated 18 November 2026.
+> **Experimental.** Updated 19 November 2026.
 
 A free, open-source AES67 driver for the Mac. The goal is to get a console's network audio onto a Mac without a licence, and to send the Mac's apps back out to the network as separate streams.
 
@@ -14,7 +14,7 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 | Transmit | First hardware test passed | Sends continuously on the device clock (or PTP time) and announces streams over SAP. A Riedel Artist intercom plays a 1-channel stream from the Mac. Not yet tried with Dante or RAVENNA, or with more than one channel. |
 | PTP | Working on a real network, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Locks to a real grandmaster in about 10 seconds with unicast Delay_Req. Only short runs so far ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
 | Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set with `aes67ctl` or in `streams.json`. |
-| Install | Planned | Build from source only, with Homebrew and CMake. `sudo cmake --install` installs and configures the driver and `aes67ctl`. No downloadable installer yet. |
+| Install | Pre-release | A signed and notarized `.pkg` on the [releases page](https://github.com/soundsofthesir/AES67_macos_Driver/releases), first published as 0.1.0 alpha 1 on 19 November 2026. It installs the driver, `aes67ctl` and the keepalive service. |
 
 CI builds and tests every change on macOS (Release, and with AddressSanitizer and UndefinedBehaviorSanitizer) and on Linux.
 
@@ -33,9 +33,9 @@ Follow a PTP grandmaster on the network and timestamp sent audio against it. The
 
 Issues [#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21), [#28](https://github.com/soundsofthesir/AES67_macos_Driver/issues/28). The design is in the [step 2 plan](Step2-Clocking-Plan.md).
 
-### 2. Signed installer (planned)
+### 2. Signed installer (done)
 
-A signed and notarized download on the GitHub releases page. Installing it won't need Homebrew, a compiler or the command line.
+A signed and notarized download on the GitHub releases page, first published 19 November 2026. Installing it doesn't need Homebrew, a compiler or the command line.
 
 ### 3. Manager app: streams and diagnostics (planned)
 

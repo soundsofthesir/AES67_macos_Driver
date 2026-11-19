@@ -38,7 +38,7 @@ Progress is tracked in the [step 2 plan](Docs/Step2-Clocking-Plan.md).
 
 ## Roadmap
 
-Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), then a signed installer, a Manager app that controls the driver, and per-app routing. See the [roadmap](Docs/Roadmap.md) for the full order and how to help.
+Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), then a Manager app that controls the driver, and per-app routing. See the [roadmap](Docs/Roadmap.md) for the full order and how to help.
 
 ## Known limitations
 
@@ -51,7 +51,12 @@ Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), t
 - If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`). A send stream on a named interface announces its current address as the source, so receivers that filter on source keep playing it after the address changes. A send stream with no interface announces no source filter.
 - Some apps can't open a 128-channel device. ffmpeg's AVFoundation input fails on it, because its resampler stops at 64 channels.
 
+## Installing
+
+Download the latest `.pkg` from [Releases](https://github.com/soundsofthesir/AES67_macos_Driver/releases) and double-click it. It's signed and notarized, and needs macOS 13 or later on Apple Silicon. It installs the driver, `aes67ctl` and the keepalive service, and restarts Core Audio. Then see [Setting up a stream](#setting-up-a-stream).
+
 ## Building
+
 
 ```bash
 brew install cmake
