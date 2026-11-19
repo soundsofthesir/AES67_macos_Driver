@@ -49,7 +49,8 @@ fi
 
 # Package info
 PACKAGE_ID="com.aes67.driver"
-PACKAGE_VERSION="1.0.0"
+# 0.1.0 from VERSION.txt's "0.1.0-build.19"
+PACKAGE_VERSION="$(sed -E 's/-build\.[0-9]+//' "$PROJECT_ROOT/VERSION.txt" | tr -d '[:space:]')"
 PACKAGE_NAME="AES67Driver-${PACKAGE_VERSION}-arm64.pkg"
 
 # Driver info

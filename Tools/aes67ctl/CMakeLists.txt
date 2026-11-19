@@ -15,6 +15,7 @@ add_executable(aes67ctl
     ${CMAKE_SOURCE_DIR}/Driver/SDPParser.cpp
     ${CMAKE_SOURCE_DIR}/Shared/Types.cpp
 )
+add_dependencies(aes67ctl aes67_version)
 target_include_directories(aes67ctl PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_features(aes67ctl PRIVATE cxx_std_17)
 target_link_libraries(aes67ctl PRIVATE "-framework CoreAudio" "-framework CoreFoundation")

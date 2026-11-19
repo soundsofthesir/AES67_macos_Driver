@@ -53,6 +53,11 @@ ln -s "$DIR/elsewhere.json" "$AES67_CONFIG_PATH"
 "$CTL" list 2>/dev/null >/dev/null
 check "a symlinked streams file is refused" '[ $? -eq 1 ]'
 
+out="$("$CTL" version)"
+check "version prints its own version, build and commit" '[ $? -eq 0 ] && grep -Eq "^aes67ctl   [0-9]+\.[0-9]+\.[0-9]+ build [0-9]+ \([0-9a-z-]+\)$" <<<"$out"'
+check "version reports the installed and running driver" 'grep -q "^installed  " <<<"$out" && grep -q "^running    " <<<"$out"'
+check "--version is the same command" '[ "$("$CTL" --version | head -1)" = "$(head -1 <<<"$out")" ]'
+
 if [ "$failures" -ne 0 ]; then
     echo "aes67ctl CLI: $failures failed"
     exit 1

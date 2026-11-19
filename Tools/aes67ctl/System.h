@@ -45,6 +45,15 @@ bool restartCoreAudio(std::string* error);
 /// The driver's device, by UID, if Core Audio has it.
 std::optional<AudioObjectID> findDevice();
 
+/// The installed driver bundle's version, "0.1.0 build 19", or "" if the
+/// driver isn't installed.
+std::string installedDriverVersion();
+
+/// The version the driver running in coreaudiod reports, "0.1.0 build 19
+/// (abc1234)"; "" if it reports none (drivers before 0.1.0), nullopt if
+/// Core Audio has no AES67 device.
+std::optional<std::string> runningDriverVersion();
+
 /// Wait for the driver's device to appear; false on timeout.
 bool waitForDevice(std::chrono::seconds timeout);
 

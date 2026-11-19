@@ -2,6 +2,7 @@
 /// @brief The parts of aes67ctl that look at or change this Mac.
 
 #include "System.h"
+#include "Version.h"
 #include "../../NetworkEngine/StreamConfig.h"
 #include <CoreAudio/CoreAudio.h>
 #include <arpa/inet.h>
@@ -38,6 +39,12 @@ const char* env(const char* name) {
     return value && value[0] != '\0' ? value : nullptr;
 }
 
+std::string toString(CFStringRef text) {
+    if (!text) return "";
+    char buffer[256] = {};
+    return CFStringGetCString(text, buffer, sizeof(buffer), kCFStringEncodingUTF8) ? buffer : "";
+}
+
 AudioObjectPropertyAddress defaultOutputAddress() {
     return {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
 }
@@ -55,6 +62,38 @@ std::optional<AudioObjectID> findDevice() {
     CFRelease(uid);
     if (status != noErr || device == kAudioObjectUnknown) return std::nullopt;
     return device;
+}
+
+std::string installedDriverVersion() {
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        nullptr, reinterpret_cast<const UInt8*>(kDriverBundle), static_cast<CFIndex>(std::strlen(kDriverBundle)), true);
+    CFDictionaryRef info = url ? CFBundleCopyInfoDictionaryInDirectory(url) : nullptr;
+    if (url) CFRelease(url);
+    if (!info) return "";
+    const auto value = [&](const char* key) {
+        CFStringRef name = CFStringCreateWithCString(nullptr, key, kCFStringEncodingUTF8);
+        const void* found = CFDictionaryGetValue(info, name);
+        CFRelease(name);
+        return found && CFGetTypeID(found) == CFStringGetTypeID() ? toString(static_cast<CFStringRef>(found)) : "";
+    };
+    const std::string version = value("CFBundleShortVersionString");
+    const std::string build = value("CFBundleVersion");
+    CFRelease(info);
+    if (version.empty()) return "";
+    return build.empty() ? version : version + " build " + build;
+}
+
+std::optional<std::string> runningDriverVersion() {
+    const auto device = findDevice();
+    if (!device) return std::nullopt;
+    const AudioObjectPropertyAddress address{kVersionPropertySelector, kAudioObjectPropertyScopeGlobal,
+                                             kAudioObjectPropertyElementMain};
+    CFStringRef text = nullptr;
+    UInt32 size = sizeof(text);
+    if (AudioObjectGetPropertyData(*device, &address, 0, nullptr, &size, &text) != noErr || !text) return "";
+    const std::string version = toString(text);
+    CFRelease(text);
+    return version;
 }
 
 int run(const std::vector<std::string>& argv, std::string* output) {
