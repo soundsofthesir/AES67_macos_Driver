@@ -29,7 +29,7 @@ Follow a PTP grandmaster on the network and timestamp sent audio against it. The
 - Riedel Artist plays a stream sent from the Mac, with PTP on (done, 18 November 2026).
 - Dante and RAVENNA devices play streams sent from the Mac.
 - Stereo and 8-channel streams, and runs of several hours, on hardware.
-- Several senders stay in sync with each other. The path delay measured through a switch without PTP support moved between 62 and 141 µs, so the servo issues [#192](https://github.com/soundsofthesir/AES67_macos_Driver/issues/192) to [#196](https://github.com/soundsofthesir/AES67_macos_Driver/issues/196) matter here.
+- Several senders stay in sync with each other. The measured path delay moved between 62 and 141 µs from one lock to the next, so the servo issues [#192](https://github.com/soundsofthesir/AES67_macos_Driver/issues/192) to [#196](https://github.com/soundsofthesir/AES67_macos_Driver/issues/196) matter here.
 
 Issues [#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21), [#28](https://github.com/soundsofthesir/AES67_macos_Driver/issues/28). The design is in the [step 2 plan](Step2-Clocking-Plan.md).
 
