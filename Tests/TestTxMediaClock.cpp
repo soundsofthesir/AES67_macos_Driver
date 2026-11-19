@@ -352,6 +352,42 @@ double percentile(std::vector<double> values, double p) {
     return values[static_cast<size_t>(p * static_cast<double>(values.size() - 1))];
 }
 
+struct RatePoint {
+    double seconds;  // arrival, from the first packet
+    double packets;  // packet times, from the first packet's RTP timestamp
+};
+
+// Packet times per second, measured between the earliest arrivals in the
+// first and last quarters of the run. A descheduled capture thread only ever
+// makes an arrival later, so the earliest ones track when packets left; a
+// least-squares fit through every arrival is pulled off by a burst of late
+// ones on a loaded runner. Iterates because which arrival counts as earliest
+// depends on the slope.
+double earliestArrivalRate(const std::vector<RatePoint>& points) {
+    if (points.size() < 8) return 0.0;
+    const double n = static_cast<double>(points.size());
+    double sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
+    for (const auto& p : points) {
+        sumX += p.seconds; sumY += p.packets; sumXX += p.seconds * p.seconds; sumXY += p.seconds * p.packets;
+    }
+    double rate = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const size_t quarter = points.size() / 4;
+    const auto earliest = [&](size_t begin, size_t end) {
+        // Earliest relative to the current slope: the largest packets - rate * seconds
+        return *std::max_element(points.begin() + static_cast<std::ptrdiff_t>(begin),
+                                 points.begin() + static_cast<std::ptrdiff_t>(end),
+                                 [&](const RatePoint& a, const RatePoint& b) {
+                                     return a.packets - rate * a.seconds < b.packets - rate * b.seconds;
+                                 });
+    };
+    for (int i = 0; i < 4; ++i) {
+        const RatePoint a = earliest(0, quarter);
+        const RatePoint b = earliest(points.size() - quarter, points.size());
+        rate = (b.packets - a.packets) / (b.seconds - a.seconds);
+    }
+    return rate;
+}
+
 void testPacketsCarryTheirMediaPositions() {
     std::cout << "TX packets carry the media positions they are stamped with, and leave on time" << std::endl;
     TxHarness h;
@@ -455,19 +491,17 @@ void testFollowsTheMediaClockRate() {
     tx.stop();
     const auto packets = settled(capture.stop());
 
-    // Least-squares packet times per host second, against the nominal 1000.
-    // Packet times come from the RTP timestamps, not from counting packets:
-    // a transmitter that falls behind on a loaded machine skips packets.
+    // Packet times per host second, against the nominal 1000. Packet times
+    // come from the RTP timestamps, not from counting packets: a transmitter
+    // that falls behind on a loaded machine skips packets.
     const double ticksPerSecond = HostTimebase::current().ticksPerSecond();
-    double sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
-    const double n = static_cast<double>(packets.size());
-    for (size_t i = 0; i < packets.size(); ++i) {
-        const double x = static_cast<double>(packets[i].arrivalHost - packets.front().arrivalHost) / ticksPerSecond;
-        const double y = static_cast<double>(static_cast<uint32_t>(packets[i].timestamp - packets.front().timestamp)) /
-                         kFramesPerPacket;
-        sumX += x; sumY += y; sumXX += x * x; sumXY += x * y;
+    std::vector<RatePoint> points;
+    for (const auto& p : packets) {
+        points.push_back({static_cast<double>(p.arrivalHost - packets.front().arrivalHost) / ticksPerSecond,
+                          static_cast<double>(static_cast<uint32_t>(p.timestamp - packets.front().timestamp)) /
+                              kFramesPerPacket});
     }
-    const double packetsPerSecond = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+    const double packetsPerSecond = earliestArrivalRate(points);
     const double ppm = (packetsPerSecond / 1000.0 - 1.0) * 1e6;
     std::cout << "  packet rate " << ppm << " ppm against nominal (clock at +1000 ppm)" << std::endl;
     CHECK(std::fabs(ppm - 1000.0) < 100.0, "the packet rate should follow the media clock (" << ppm << " ppm)");
