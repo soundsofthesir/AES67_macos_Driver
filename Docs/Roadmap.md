@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Experimental.** Updated 15 November 2026.
+> **Experimental.** Updated 18 November 2026.
 
 A free, open-source AES67 driver for the Mac. The goal is to get a console's network audio onto a Mac without a licence, and to send the Mac's apps back out to the network as separate streams.
 
@@ -10,9 +10,9 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 
 | Area | Status | Notes |
 |---|---|---|
-| Receive | Working | Tested in Core Audio with test streams. Fixed 8 ms latency. The device clock locks to the incoming stream and rides out short network stalls. |
-| Transmit | Needs a real network | Sends continuously on the device clock (or PTP time) and announces streams over SAP. Tested on this Mac only; no Dante, RAVENNA or other receiver has played the streams yet. |
-| PTP | Built, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Holdover and recovery after the grandmaster goes quiet are in. Tested on loopback against test masters; a real network is next ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
+| Receive | Working | Fixed 8 ms latency. The device clock locks to the incoming stream and rides out short network stalls. Received a 1-channel stream from Riedel gear with no loss. |
+| Transmit | First hardware test passed | Sends continuously on the device clock (or PTP time) and announces streams over SAP. A Riedel Artist intercom plays a 1-channel stream from the Mac. Not yet tried with Dante or RAVENNA, or with more than one channel. |
+| PTP | Working on a real network, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Locks to a real grandmaster in about 10 seconds with unicast Delay_Req. Only short runs so far ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
 | Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set in `streams.json`. |
 | Install | Planned | Build from source only, with Homebrew and CMake. No downloadable installer yet. |
 
@@ -26,8 +26,10 @@ In order. Each step depends on the ones before it, so dates aren't promised.
 
 Follow a PTP grandmaster on the network and timestamp sent audio against it. Then test with Dante devices in AES67 mode, RAVENNA devices and anything else people bring.
 
+- Riedel Artist plays a stream sent from the Mac, with PTP on (done, 18 November 2026).
 - Dante and RAVENNA devices play streams sent from the Mac.
-- Several senders stay in sync with each other.
+- Stereo and 8-channel streams, and runs of several hours, on hardware.
+- Several senders stay in sync with each other. The measured path delay moved between 62 and 141 µs from one lock to the next, so the servo issues [#192](https://github.com/soundsofthesir/AES67_macos_Driver/issues/192) to [#196](https://github.com/soundsofthesir/AES67_macos_Driver/issues/196) matter here.
 
 Issues [#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21), [#28](https://github.com/soundsofthesir/AES67_macos_Driver/issues/28). The design is in the [step 2 plan](Step2-Clocking-Plan.md).
 
@@ -40,7 +42,7 @@ A signed and notarized download on the GitHub releases page. Installing it won't
 The Manager app controls the driver directly. Streams announced on the network appear in a list and can be added with a click, without editing files or restarting Core Audio.
 
 - PTP lock and offset, packet loss, audio that arrived but was written too late to play, and the network interface in use, shown live. The driver already counts late audio per stream.
-- Plain warnings for common network problems: no IGMP querier on the switch, Energy Efficient Ethernet, Wi-Fi, and streams outside Dante's 239.69.x.x range.
+- Plain warnings for common network problems: no IGMP querier on the switch, the AES67 interface in a bridge (Internet Sharing), Energy Efficient Ethernet, Wi-Fi, and streams outside Dante's 239.69.x.x range.
 
 ### 4. Per-app routing (planned)
 
