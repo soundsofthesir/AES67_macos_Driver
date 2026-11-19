@@ -3,119 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-            font-size: 13px;
-            line-height: 1.6;
-            padding: 20px;
-        }
-        h1 {
-            font-size: 20px;
-            font-weight: 600;
-            margin-bottom: 15px;
-        }
-        h2 {
-            font-size: 16px;
-            font-weight: 600;
-            margin-top: 20px;
-            margin-bottom: 10px;
-        }
-        code {
-            background-color: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-family: "SF Mono", Monaco, Menlo, monospace;
-            font-size: 12px;
-        }
-        .info-box {
-            background-color: #e3f2fd;
-            border-left: 4px solid #2196f3;
-            padding: 12px 15px;
-            margin: 15px 0;
-        }
-        .warning-box {
-            background-color: #fff3cd;
-            border-left: 4px solid #ffc107;
-            padding: 12px 15px;
-            margin: 15px 0;
-        }
-        ul {
-            margin: 10px 0;
-            padding-left: 25px;
-        }
-        li {
-            margin: 5px 0;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; line-height: 1.5; padding: 20px; }
+        h1 { font-size: 20px; font-weight: 600; margin: 0 0 12px; }
+        h2 { font-size: 15px; font-weight: 600; margin: 20px 0 6px; }
+        ul { margin: 6px 0; padding-left: 22px; }
+        li { margin: 3px 0; }
+        code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
     </style>
 </head>
 <body>
-    <h1>AES67 macOS Audio Driver - Installation Information</h1>
+    <h1>Before you install</h1>
 
-    <div class="warning-box">
-        <strong>⚠️ Important:</strong> This is experimental software. Please read all information carefully before proceeding.
-    </div>
-
-    <h2>What This Driver Does</h2>
-    <p>The AES67 Driver creates a 128-channel virtual audio device on your Mac that can send and receive audio over IP networks using industry-standard protocols:</p>
+    <h2>Requirements</h2>
     <ul>
-        <li><strong>AES67</strong> - Audio Engineering Society standard for audio over IP</li>
-        <li><strong>RAVENNA</strong> - Professional network audio protocol</li>
-        <li><strong>Dante</strong> - Audinate's media networking technology</li>
+        <li>macOS 13 or later on Apple Silicon</li>
+        <li>A wired network interface for AES67</li>
     </ul>
 
-    <h2>Installation Location</h2>
-    <p>The driver will be installed at:</p>
-    <code>/Library/Audio/Plug-Ins/HAL/AES67Driver.driver</code>
-
-    <h2>After Installation</h2>
-    <p>The driver will appear as <strong>"AES67 Device"</strong> in:</p>
+    <h2>Known limitations</h2>
     <ul>
-        <li>System Settings → Sound</li>
-        <li>Audio MIDI Setup application</li>
-        <li>Your DAW or audio application's device settings</li>
+        <li>Receiving works. Sending has been tested with one device and one channel.</li>
+        <li>Streams are set up with <code>aes67ctl</code> in Terminal. There is no app yet.</li>
     </ul>
 
-    <div class="info-box">
-        <strong>Note:</strong> Core Audio will be restarted during installation. Any running audio applications will be briefly interrupted.
-    </div>
-
-    <h2>Known Limitations</h2>
-    <ul>
-        <li><strong>NOT tested</strong> with real AES67/Dante hardware</li>
-        <li>Hardware compatibility is <strong>unknown</strong></li>
-        <li>May not work in production environments</li>
-        <li>Requires macOS 13.0 or later</li>
-        <li>Optimized for Apple Silicon (M1/M2/M3) Macs</li>
-        <li>Intel Mac compatibility is unknown</li>
-    </ul>
-
-    <h2>Configuration</h2>
-    <p>After installation, use the <strong>AES67 Manager</strong> application (sold separately or available from source) to:</p>
-    <ul>
-        <li>Add and configure network audio streams</li>
-        <li>Map stream channels to device channels</li>
-        <li>Monitor stream status and statistics</li>
-        <li>Import/export SDP session files</li>
-    </ul>
-
-    <h2>Uninstalling</h2>
-    <p>To remove the driver, run the uninstall script:</p>
-    <code>sudo /path/to/uninstall.sh</code>
-
-    <p>Or manually remove:</p>
-    <code>sudo rm -rf /Library/Audio/Plug-Ins/HAL/AES67Driver.driver<br>
-    sudo killall coreaudiod</code>
-
-    <h2>Support and Reporting Issues</h2>
-    <p>This is open-source software. For issues, questions, or to contribute:</p>
-    <ul>
-        <li>Visit: <a href="https://github.com/yourusername/AES67_macos_Driver">GitHub Repository</a></li>
-        <li>Report bugs with detailed logs and system information</li>
-        <li>Contributions and testing help are welcome!</li>
-    </ul>
-
-    <div class="warning-box">
-        <strong>Remember:</strong> This software is experimental. Always test thoroughly before relying on it for important work. Keep backups of your audio sessions.
-    </div>
+    <p>Source, documentation and issues: <a href="https://github.com/soundsofthesir/AES67_macos_Driver">https://github.com/soundsofthesir/AES67_macos_Driver</a></p>
 </body>
 </html>

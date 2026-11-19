@@ -55,7 +55,7 @@
         id="com.aes67.driver"
         visible="true"
         title="AES67 Audio Driver"
-        description="Installs the AES67 network audio driver (experimental - use at your own risk)"
+        description="Installs the AES67 driver, aes67ctl and the keepalive service."
         start_selected="true"
         start_enabled="true"
         start_visible="true">
@@ -64,7 +64,7 @@
 
     <pkg-ref
         id="com.aes67.driver"
-        version="1.0.0"
+        version="@PACKAGE_VERSION@"
         auth="root">
         AES67Driver.pkg
     </pkg-ref>

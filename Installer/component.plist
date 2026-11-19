@@ -12,17 +12,5 @@
 		<key>RootRelativeBundlePath</key>
 		<string>Library/Audio/Plug-Ins/HAL/AES67Driver.driver</string>
 	</dict>
-	<dict>
-		<key>BundleHasStrictIdentifier</key>
-		<true/>
-		<key>BundleIsRelocatable</key>
-		<false/>
-		<key>BundleIsVersionChecked</key>
-		<true/>
-		<key>BundleOverwriteAction</key>
-		<string>upgrade</string>
-		<key>RootRelativeBundlePath</key>
-		<string>Applications/AES67Manager.app</string>
-	</dict>
 </array>
 </plist>
