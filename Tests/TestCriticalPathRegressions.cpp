@@ -18,6 +18,7 @@
 
 #include "RxTestSupport.h"
 #include "TestWait.h"
+#include "../NetworkEngine/StreamConfig.h"
 #include "SapTestSupport.h"
 #include "PtpTestMaster.h"
 #include "../NetworkEngine/RTP/SimpleRTP.h"
@@ -966,6 +967,51 @@ void testTxStreamIsAnnounced() {
                                              "SAP TX A");
     CHECK(!reloadedA.empty() && !a.empty() && reloadedA.front().sessionID == a.front().sessionID,
           "a reloaded stream keeps its session ID");
+}
+
+// A saved TX stream's sourceAddress goes stale when the interface's address
+// changes (DHCP, a cleared static IP). Receivers filter on the announced
+// source (a=source-filter), so the announcement must name the live address.
+void testTxAnnouncesTheLiveSourceAddress() {
+    std::cout << "TX streams announce the interface's current address as their source" << std::endl;
+    const std::string path = useEmptyConfig("sapsource");
+    const std::string address = NetworkInterfaceDetection::resolveIPv4Address("");
+    if (address.empty()) {
+        std::cout << "  skipped: no network interface" << std::endl;
+        return;
+    }
+    SDPSession sdp;
+    sdp.sessionName = "SAP Source";
+    sdp.connectionAddress = "239.69.99.10";
+    sdp.port = 55034;
+    sdp.ttl = 0;
+    sdp.encoding = "L24";
+    sdp.payloadType = 97;
+    sdp.sampleRate = 48000;
+    sdp.numChannels = 2;
+    sdp.ptime = 1;
+    sdp.framecount = 48;
+    sdp.direction = "sendonly";
+    sdp.sessionID = 4242;
+    sdp.sourceAddress = "192.0.2.77";  // TEST-NET-1: never this Mac's address
+    std::ofstream(path) << StreamConfigManager::toJSON({StreamConfigManager::createConfig(sdp, makeMapping(2, 0))});
+
+    SapCapture capture("239.255.255.255", kTestSapPort, address);
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    {
+        StreamManager manager(harness.context(), txContext, testSap());
+        CHECK(manager.loadSavedStreams(), "the saved TX stream should load");
+        TestWait::waitUntil([&] { return !announcedSessions(capture.packets(), "SAP Source").empty(); },
+                            std::chrono::milliseconds(2000));
+    }
+    const auto sessions = announcedSessions(capture.packets(), "SAP Source");
+    CHECK(!sessions.empty(), "the stream should be announced");
+    if (!sessions.empty()) {
+        CHECK(sessions.front().sourceAddress == address,
+              "the source filter names the live address " << address << " (got " << sessions.front().sourceAddress << ")");
+    }
 }
 
 // With PTP followed, TX streams name the grandmaster (ts-refclk:ptp, in the
@@ -2450,6 +2496,7 @@ int main() {
     testInputAndOutputChannelsAreSeparate();
     testSenderSdpDirectionDoesNotMakeATransmitter();
     testTxStreamIsAnnounced();
+    testTxAnnouncesTheLiveSourceAddress();
     testTxAnnouncesThePtpGrandmaster();
     testTimelineRestartNeverReusesPositions();
     testNoDefaultTxStream();

@@ -828,6 +828,9 @@ void StreamManager::announceTx(const StreamID& id, const ManagedStream& managed)
     sdp.originNetworkType = "IN";
     sdp.originAddressType = "IP4";
     sdp.originAddress = address;
+    // Receivers filter on the source (a=source-filter); a saved address goes
+    // stale when the interface's address changes
+    sdp.sourceAddress = address;
     sdp.framecount = managed.transmitter->framesPerPacket();
 
     if (ptpGrandmaster_) {
