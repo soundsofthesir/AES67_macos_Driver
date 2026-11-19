@@ -114,6 +114,42 @@ Options:
 
 Running `setup` again with the same group replaces that stream; other streams stay.
 
+### Sending and receiving at once
+
+"AES67 Device" always has 128 inputs and 128 outputs at 48 kHz. Only channels mapped to a stream carry audio. Unmapped inputs are silent, and audio sent to unmapped outputs is dropped. Inputs and outputs are numbered separately, so a send stream and a receive stream can both start at channel 1.
+
+Stereo both ways:
+
+```bash
+sudo aes67ctl setup --interface en0 --send 239.69.1.2 --receive 239.69.1.1
+```
+
+Device outputs 1 and 2 go out on 239.69.1.2, and the stream on 239.69.1.1 arrives on device inputs 1 and 2. `setup` makes "AES67 Device" the default output but not the default input. Choose it as the input in System Settings > Sound or in the recording app.
+
+4 channels both ways:
+
+```bash
+sudo aes67ctl setup --interface en0 \
+  --send 239.69.1.2 --send-channels 4 \
+  --receive 239.69.1.1 --receive-channels 4
+```
+
+To add a receive stream to an existing setup without changing the send stream:
+
+```bash
+sudo aes67ctl add receive 239.69.1.1 --interface en0 --channels 4
+```
+
+Use your receiver's group for `--send` and your sender's group for `--receive`. `aes67ctl list` shows the resulting channel mapping.
+
+To use the 4 channels in REAPER:
+
+1. In Preferences > Audio > Device, choose CoreAudio, then "AES67 Device", at 48000 Hz.
+2. Set the input range and output range to channels 1 to 4, so track menus don't list all 128.
+3. Set a track's input to Input 1 (mono) or Inputs 1/2 (stereo) to record from the network. Route a track or the master to hardware outputs 1 to 4 to send.
+
+Because `setup` makes "AES67 Device" the default output, macOS system sound also plays on outputs 1 and 2. To keep it off the stream, set the Mac's output back to your speakers in System Settings > Sound.
+
 | Command | What it does |
 |---|---|
 | `aes67ctl status` | PTP lock since Core Audio started, then packets per second and peak level on each stream's group. It only listens. |
