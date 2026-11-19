@@ -160,12 +160,12 @@ void PtpClockSource::step() {
     }
     if (locked != locked_.load(std::memory_order_acquire)) {
         if (locked && received.master) {
-            AES67_LOGF("PTP: locked to grandmaster %s via %s, path delay %.1f us, rate %+.2f ppm",
+            AES67_NOTICEF("PTP: locked to grandmaster %s via %s, path delay %.1f us, rate %+.2f ppm",
                        received.master->announce.grandmasterIdentity.toString().c_str(),
                        received.master->sender.clock.toString().c_str(), received.pathDelayNs / 1000.0,
                        received.estimate ? (received.estimate->rate - 1.0) * 1e6 : 0.0);
         } else if (!locked) {
-            AES67_LOGF("PTP: not locked (%s); the clock keeps its rate", received.master ? "acquiring" : "no master");
+            AES67_NOTICEF("PTP: not locked (%s); the clock keeps its rate", received.master ? "acquiring" : "no master");
         }
     }
     publishLock(locked, domain);

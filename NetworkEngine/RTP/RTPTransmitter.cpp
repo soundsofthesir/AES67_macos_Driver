@@ -159,7 +159,7 @@ bool RTPTransmitter::start() {
         return false;
     }
 
-    AES67_LOGF("RTPTransmitter::start: %s:%u, %u frames per packet (stream=%s)",
+    AES67_NOTICEF("RTPTransmitter::start: %s:%u, %u frames per packet (stream=%s)",
                sdp_.connectionAddress.c_str(), sdp_.port, framesPerPacket_, sdp_.sessionName.c_str());
     return true;
 }
