@@ -9,6 +9,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <pwd.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -179,9 +180,21 @@ bool writeFile(const std::string& path, const std::string& contents, std::string
 }
 
 bool restartCoreAudio(std::string* error) {
-    if (run({"/bin/launchctl", "kickstart", "-kp", "system/com.apple.audio.coreaudiod"}) == 0) return true;
-    if (error) *error = "launchctl couldn't restart coreaudiod";
-    return false;
+    std::string pidText;
+    run({"/usr/bin/pgrep", "-x", "coreaudiod"}, &pidText);
+    const pid_t old = static_cast<pid_t>(std::atoi(pidText.c_str()));
+    // launchd starts it again. With SIP on, launchctl kickstart can't restart it
+    if (run({"/usr/bin/killall", "coreaudiod"}) != 0) {
+        if (error) *error = "couldn't stop coreaudiod (killall failed)";
+        return false;
+    }
+    // Talk to Core Audio only once the old daemon is gone, or this process
+    // connects to it and loses the device list as it exits
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (old > 0 && kill(old, 0) == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return true;
 }
 
 bool waitForDevice(std::chrono::seconds timeout) {

@@ -76,7 +76,7 @@ sudo installer -pkg Installer/output/AES67Driver-1.0.0-arm64.pkg -target /
 
 Check the installation log for troubleshooting:
 ```bash
-cat /tmp/aes67driver_install.log
+cat /var/log/aes67driver_install.log
 ```
 
 ## What the Installer Does
@@ -203,7 +203,7 @@ system_profiler SPAudioDataType
 
 1. Check installation log:
    ```bash
-   cat /tmp/aes67driver_install.log
+   cat /var/log/aes67driver_install.log
    ```
 
 2. Verify driver exists:
@@ -291,4 +291,4 @@ sudo spctl --master-enable   # Re-enable Gatekeeper
 For issues or questions:
 - GitHub Issues: https://github.com/yourusername/AES67_macos_Driver/issues
 - Documentation: See main README.md
-- Installation Logs: `/tmp/aes67driver_install.log`
+- Installation Logs: `/var/log/aes67driver_install.log`

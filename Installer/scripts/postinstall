@@ -3,8 +3,7 @@
 # postinstall
 # AES67 macOS Driver Installer - runs after the package is installed.
 #
-LOG_FILE="/tmp/aes67driver_install.log"
-export LOG_FILE
+LOG_FILE="/var/log/aes67driver_install.log"
 echo "=== AES67 Driver Post-Installation Script ===" | tee -a "$LOG_FILE"
 echo "Date: $(date)" | tee -a "$LOG_FILE"
 

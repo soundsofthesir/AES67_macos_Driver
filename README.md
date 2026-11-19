@@ -26,7 +26,7 @@ These were short runs, about 15 minutes, on a dedicated USB Ethernet adapter wit
 - Rejoining streams after a network change (new IP address, Wi-Fi roam, cable replug).
 - Returning an error instead of terminating coreaudiod when a Core Audio callback hits a C++ exception, such as a failed allocation. A start that fails partway is rolled back.
 
-PTP is off by default. With `ptp.json` turning it on (see [Configuration](#configuration)), the device clock runs on PTP time, received audio is placed by it, and sent streams are stamped with it and name the grandmaster in their SAP announcements.
+PTP is off by default. With `ptp.json` turning it on (see [Setting up a stream](#setting-up-a-stream)), the device clock runs on PTP time, received audio is placed by it, and sent streams are stamped with it and name the grandmaster in their SAP announcements.
 
 **Not done yet:**
 
@@ -70,16 +70,13 @@ make -j
 ctest --output-on-failure
 ```
 
-Install:
+Install from the build directory. This copies the driver, `aes67ctl` and the Manager app, gives the driver its config directory, and restarts Core Audio:
 
 ```bash
-sudo cp -R AES67Driver.driver /Library/Audio/Plug-Ins/HAL/
-sudo mkdir -p "/Library/Application Support/AES67Driver"
-sudo chown _coreaudiod:wheel "/Library/Application Support/AES67Driver"
-sudo killall coreaudiod
+sudo cmake --install .
 ```
 
-The driver runs as `_coreaudiod` and needs to own its config directory to save stream changes (the installer does this). With SIP on, `launchctl kickstart` can't restart coreaudiod; `killall` can. Restart it as rarely as you can: on macOS 26.0.1, about 20 restarts in one session left system audio daemons using all CPU until logout.
+`Installer/build-installer.sh` builds the same install as a .pkg.
 
 The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 128 outputs.
 
@@ -89,75 +86,60 @@ Apps that pick a device by UID need `com.aes67.driver.device`. JACK is one: `-d`
 jackd -d coreaudio -d com.aes67.driver.device -r 48000 -p 256
 ```
 
-## Configuration
+## Setting up a stream
 
-Streams are read from `streams.json`, looked for in this order:
+`aes67ctl` sets up streams without editing JSON. To send the Mac's audio to an AES67 receiver:
 
-1. `$AES67_CONFIG_PATH` (if set, only this path is used, even before the file exists)
-2. `~/Library/Application Support/AES67Driver/` (tests and tools only: the installed driver's home is `/var/empty`)
-3. `/Library/Application Support/AES67Driver/`
-
-With no config file, the driver creates one test receive stream (239.1.1.1:5004, 8 channels) and no send streams. A config file with no streams, or none that load, stays as it is. Each stream can name a network interface (`en0`) or leave it blank to use the main one. Both files are read when Core Audio loads the driver, so restart coreaudiod after editing them.
-
-This receive stream was tested with Riedel gear. It puts a 1-channel stream on device input 1:
-
-```json
-{
-  "version": "1.0",
-  "streams": [
-    {
-      "enabled": true,
-      "description": "Intercom feed",
-      "networkInterface": "en10",
-      "sdp": {
-        "sessionName": "Intercom feed",
-        "connectionAddress": "239.69.1.1",
-        "port": 5004,
-        "ttl": 32,
-        "payloadType": 96,
-        "encoding": "L24",
-        "sampleRate": 48000,
-        "numChannels": 1,
-        "ptime": 1,
-        "framecount": 48,
-        "sourceAddress": "192.168.1.20",
-        "ptpDomain": 0,
-        "mediaClockType": "direct=0",
-        "direction": "recvonly"
-      },
-      "mapping": {
-        "streamID": "609097ea-20a4-4493-b256-ec048978c223",
-        "streamName": "Intercom feed",
-        "streamChannelCount": 1,
-        "streamChannelOffset": 0,
-        "deviceChannelStart": 0,
-        "deviceChannelCount": 1
-      }
-    }
-  ]
-}
+```bash
+aes67ctl doctor --interface en0
+sudo aes67ctl setup --interface en0 --send 239.69.1.2
 ```
 
-For a send stream, set `direction` to `sendonly`, give it its own group and UUID, and set `sourceAddress` to the Mac's address. `streamID` must be a UUID (`uuidgen` makes one). `deviceChannelStart` counts from 0, so 0 is device channel 1. Inputs and outputs are counted separately, so a receive stream and a send stream can both start at 0. The Mac's stereo output plays on device outputs 1 and 2, so a 1-channel send stream on output 1 carries only the left channel.
+`doctor` checks the driver, the interface's link and IPv4 address, whether the interface is bridged (Internet Sharing) and whether a VPN has taken the multicast route. It only reads.
+
+`setup` does these steps in order:
+
+1. Runs the same checks, and stops on a failure.
+2. Writes a 2-channel send stream carrying the Mac's stereo output, and turns PTP on for that interface.
+3. Restarts Core Audio once.
+4. Makes "AES67 Device" the default output.
+5. Waits for PTP to lock, then reports packets and level for each stream.
+
+Options:
+
+- `--receive <group>` adds a receive stream, which appears on device inputs 1 and 2.
+- `--send-channels` and `--receive-channels` set the channel counts, from 1 to 8.
+- `--ptp-hybrid` sends Delay_Req unicast, as some grandmasters need.
+- `--no-ptp` leaves PTP off.
+
+Running `setup` again with the same group replaces that stream; other streams stay.
+
+| Command | What it does |
+|---|---|
+| `aes67ctl status` | PTP lock since Core Audio started, then packets per second and peak level on each stream's group. It only listens. |
+| `aes67ctl list` | The configured streams and their device channels. |
+| `sudo aes67ctl add send\|receive <group> --interface en0` | Adds one stream. `--first-channel` and `--channels` place it. |
+| `sudo aes67ctl remove <group>` | Removes the streams on a group. |
+| `sudo aes67ctl restart` | Restarts Core Audio so the driver reads its files again. |
+
+`add`, `remove` and `setup` restart Core Audio when they finish. Pass `--no-restart` to make several changes, then run `restart` once. Restart as rarely as you can: on macOS 26.0.1, about 20 restarts in one session left system audio daemons using all CPU until logout.
 
 Receive streams join their multicast group only while an app is using the device. A switch with IGMP snooping won't forward the stream until then. Send streams start when the driver loads and send silence when nothing is playing.
 
-Streams marked `"enabled": false`, and entries the driver can't read, are kept in the file when it saves. They also keep their device channels, so a new stream never lands on a disabled stream's channels and the stream comes back where it was when enabled again. If a running stream and a saved one list the same channels, the running one has them. A file that isn't valid JSON is copied to `streams.json.bak` and left in place.
+`status` and the tests need the terminal app to have Local Network permission (System Settings > Privacy & Security > Local Network).
 
-PTP is off unless `ptp.json` turns it on. It's looked for in `$AES67_PTP_CONFIG_PATH` (if set, only there), then `ptp.json` in the same two Application Support folders:
+## Configuration
 
-```json
-{ "enabled": true, "interface": "en0", "domain": 0, "hybrid": false }
-```
+The driver reads `streams.json` and `ptp.json` from `/Library/Application Support/AES67Driver/` when Core Audio loads it. [Docs/StreamConfig.md](Docs/StreamConfig.md) describes both files, for editing by hand.
 
-`interface` is a name, an address, or `""` for the main one. `domain` is 0 to 127. `hybrid` sends Delay_Req unicast to the master instead of multicast. A file that can't be read leaves PTP off. With PTP on, the driver sends Delay_Req packets onto the network, about one a second. Check `PTP: locked to grandmaster` in the driver log. If it later logs `PTP: not locked (no master)` every few minutes, the switch has stopped forwarding PTP to the Mac (see [Known limitations](#known-limitations)).
+With PTP on, the driver log says `PTP: locked to grandmaster` once it locks. If it later logs `PTP: not locked (no master)` every few minutes, the switch has stopped forwarding PTP to the Mac (see [Known limitations](#known-limitations)).
 
 ## Testing tools
 
 - CI (`.github/workflows/ci.yml`) builds and runs `ctest` on macOS in Release and with AddressSanitizer + UndefinedBehaviorSanitizer (`-DAES67_SANITIZE=ON`), and runs the tests that need no Apple frameworks on Linux with both sanitizers (`Tests/Linux/run-portable-tests.sh`).
 - CI sets `AES67_TEST_RELAXED_TIMING=1`, which widens the tests' limits on timing accuracy (PTP phase, packet departure times, and how many packets a sender gets out in a set time) for shared runners. Ordering and continuity checks don't change. Receive tests excuse only packets their own sender sent late, or that the driver counted as written after playout.
 - `Tests/Fuzz/run-fuzzers.sh` fuzzes the parsers that read network packets and config files (PTP, SAP, SDP, `streams.json`, `ptp.json`) with libFuzzer on Linux. CI replays `Tests/Fuzz/corpus` on every PR, and fuzzes each parser for 5 minutes nightly (`.github/workflows/fuzz.yml`).
-- `ctest` runs 26 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
+- `ctest` runs 29 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
 - `AES67TestSender` sends a test tone **onto your network** (default 239.1.1.1:5004).
 - `AES67ClockProbeClient` measures the device's clock and checks the audio is continuous. Build it with `-DBUILD_SPIKES=ON`.
 - Driver logs go to the unified log: `sudo log show --info --predicate 'subsystem == "com.aes67driver"'`, or `log stream` with the same predicate to watch live.

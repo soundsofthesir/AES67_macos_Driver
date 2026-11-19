@@ -5,7 +5,7 @@
 # Audio so it loads. Run as root by the .pkg postinstall and by
 # `cmake --install` (#167), so both install paths end in the same state.
 #
-LOG_FILE="${LOG_FILE:-/tmp/aes67driver_install.log}"
+LOG_FILE="/var/log/aes67driver_install.log"  # root-only directory
 log() { echo "$1" | tee -a "$LOG_FILE"; }
 
 DRIVER_PATH="/Library/Audio/Plug-Ins/HAL/AES67Driver.driver"
@@ -35,7 +35,8 @@ chown -R root:wheel "$DRIVER_PATH" || log "WARNING: Failed to set driver ownersh
 chmod -R 755 "$DRIVER_PATH" || log "WARNING: Failed to set driver permissions"
 
 log "Restarting Core Audio..."
-launchctl kickstart -kp system/com.apple.audio.coreaudiod >/dev/null 2>&1 || killall coreaudiod 2>/dev/null || true
+# launchd starts it again (launchctl kickstart can't with SIP on)
+killall coreaudiod 2>/dev/null || true
 sleep 2
 if pgrep -x coreaudiod >/dev/null; then
     log "Core Audio restarted"
