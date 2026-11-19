@@ -48,7 +48,7 @@ Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), t
 - Received packets that arrive more than 8 ms late play as silence. So do packets that arrive on time but that the receive thread writes after Core Audio has read past them, which happens when the thread is held off the CPU. The driver counts these per stream but doesn't report the count anywhere yet.
 - The Manager app doesn't control the driver yet.
 - Dante's default AES67 multicast range is 239.69.x.x. The driver logs a warning for send streams outside it.
-- If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`).
+- If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`). A send stream on a named interface announces its current address as the source, so receivers that filter on source keep playing it after the address changes. A send stream with no interface announces no source filter.
 - Some apps can't open a 128-channel device. ffmpeg's AVFoundation input fails on it, because its resampler stops at 64 channels.
 
 ## Building
@@ -150,7 +150,7 @@ With PTP on, the driver log says `PTP: locked to grandmaster` once it locks. If 
 Driver/          Core Audio device and IO
 NetworkEngine/   RTP send/receive, media clock, SAP, stream management
 Shared/          Common types
-Tools/           Test sender, receiver and probes
+Tools/           aes67ctl, test sender, receiver and probes
 Tests/           Test suites
 Docs/            Design plan and investigation write-ups
 Installer/       Installer package scripts (unsigned)
