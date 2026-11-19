@@ -1,0 +1,45 @@
+#!/bin/bash
+#
+# configure-driver
+# Gives an installed driver what it needs at run time, then restarts Core
+# Audio so it loads. Run as root by the .pkg postinstall and by
+# `cmake --install` (#167), so both install paths end in the same state.
+#
+LOG_FILE="${LOG_FILE:-/tmp/aes67driver_install.log}"
+log() { echo "$1" | tee -a "$LOG_FILE"; }
+
+DRIVER_PATH="/Library/Audio/Plug-Ins/HAL/AES67Driver.driver"
+CONFIG_DIR="/Library/Application Support/AES67Driver"
+
+if [ "$(id -u)" -ne 0 ]; then
+    log "ERROR: configure-driver must run as root"
+    exit 1
+fi
+
+if [ ! -d "$DRIVER_PATH" ]; then
+    log "ERROR: Driver bundle not found at: $DRIVER_PATH"
+    exit 1
+fi
+
+# The driver runs as _coreaudiod and saves streams.json by writing a temp
+# file here and renaming it over the old one, so it must own the directory
+# (#42). Set on every install: older installers made it root-owned.
+mkdir -p "$CONFIG_DIR" || log "WARNING: Failed to create $CONFIG_DIR"
+if chown _coreaudiod:wheel "$CONFIG_DIR" && chmod 755 "$CONFIG_DIR"; then
+    log "Configuration directory: $CONFIG_DIR (owner _coreaudiod)"
+else
+    log "WARNING: Failed to give the driver its configuration directory; stream changes won't be saved"
+fi
+
+chown -R root:wheel "$DRIVER_PATH" || log "WARNING: Failed to set driver ownership"
+chmod -R 755 "$DRIVER_PATH" || log "WARNING: Failed to set driver permissions"
+
+log "Restarting Core Audio..."
+launchctl kickstart -kp system/com.apple.audio.coreaudiod >/dev/null 2>&1 || killall coreaudiod 2>/dev/null || true
+sleep 2
+if pgrep -x coreaudiod >/dev/null; then
+    log "Core Audio restarted"
+else
+    log "WARNING: Core Audio may not have restarted"
+fi
+exit 0

@@ -491,7 +491,7 @@ add_test(NAME StreamManager COMMAND TestStreamManager)
 add_test(NAME StreamConfig COMMAND TestStreamConfig)
 add_test(NAME StreamSetup COMMAND TestStreamSetup)
 add_test(NAME Aes67ctl COMMAND TestAes67ctl)
-if(APPLE AND BUILD_TOOLS)  # Tools is added after Tests
+if(TARGET aes67ctl)
     add_test(NAME Aes67ctlCli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/aes67ctl-cli-test.sh $<TARGET_FILE:aes67ctl>)
 endif()
 add_test(NAME MultiStream COMMAND TestMultiStream)

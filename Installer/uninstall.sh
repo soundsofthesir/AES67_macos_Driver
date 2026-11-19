@@ -72,6 +72,12 @@ if [ -d "$DRIVER_PATH" ]; then
     echo "✓ Driver removed"
 fi
 
+# Remove the command-line tool
+if [ -f /usr/local/bin/aes67ctl ]; then
+    rm -f /usr/local/bin/aes67ctl
+    echo "✓ aes67ctl removed"
+fi
+
 # Remove configuration (ask first)
 if [ "$REMOVE_CONFIG" = true ]; then
     echo ""

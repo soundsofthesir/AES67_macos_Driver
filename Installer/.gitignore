@@ -56,3 +56,4 @@ Tests/*.dSYM/
 *.app
 *.pkg
 *.dmg
+payload/

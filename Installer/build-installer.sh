@@ -33,6 +33,13 @@ if [ "$1" = "--build" ]; then
         echo ""
     fi
 
+    if [ ! -x "$BUILD_DIR/aes67ctl" ]; then
+        echo "Building aes67ctl..."
+        cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+        cmake --build "$BUILD_DIR" --target aes67ctl
+        echo ""
+    fi
+
     if [ ! -d "$PROJECT_ROOT/ManagerApp/AES67Manager.app" ]; then
         echo "Building Manager app..."
         (cd "$PROJECT_ROOT/ManagerApp" && ./build.sh)
@@ -76,6 +83,14 @@ fi
 
 echo "✓ Found driver at: $DRIVER_BUILD_PATH"
 
+# Command-line setup tool
+CTL_BUILD_PATH="$BUILD_DIR/aes67ctl"
+if [ ! -x "$CTL_BUILD_PATH" ]; then
+    echo "ERROR: aes67ctl not found at: $CTL_BUILD_PATH (cmake --build build --target aes67ctl)"
+    exit 1
+fi
+echo "✓ Found aes67ctl at: $CTL_BUILD_PATH"
+
 # Check if Manager app has been built
 if [ ! -d "$MANAGER_APP_PATH" ]; then
     echo "ERROR: Manager app not found at: $MANAGER_APP_PATH"
@@ -114,6 +129,11 @@ if [ ! -d "$PAYLOAD_INSTALL_DIR/$DRIVER_NAME" ]; then
 fi
 
 echo "✓ Driver copied to payload"
+
+# Copy aes67ctl to payload
+mkdir -p "$PAYLOAD_DIR/usr/local/bin"
+cp "$CTL_BUILD_PATH" "$PAYLOAD_DIR/usr/local/bin/"
+echo "✓ aes67ctl copied to payload"
 
 # Copy Manager app to payload
 echo "Copying Manager app to payload..."

@@ -27,26 +27,6 @@ target_include_directories(AES67TestReceiver PRIVATE
 
 target_compile_features(AES67TestReceiver PRIVATE cxx_std_17)
 
-# aes67ctl: sets up streams.json and ptp.json, restarts coreaudiod, checks
-if(APPLE)
-    add_executable(aes67ctl
-        aes67ctl/main.cpp
-        aes67ctl/Checks.cpp
-        aes67ctl/System.cpp
-        aes67ctl/PacketProbe.cpp
-        ../NetworkEngine/StreamSetup.cpp
-        ../NetworkEngine/StreamConfig.cpp
-        ../NetworkEngine/Json.cpp
-        ../NetworkEngine/NetworkUtils.cpp
-        ../NetworkEngine/StreamChannelMapper.cpp
-        ../Driver/SDPParser.cpp
-        ../Shared/Types.cpp
-    )
-    target_include_directories(aes67ctl PRIVATE ${CMAKE_SOURCE_DIR})
-    target_compile_features(aes67ctl PRIVATE cxx_std_17)
-    target_link_libraries(aes67ctl PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
-endif()
-
 # Spike S1: throwaway HAL plug-in (no device) that probes whether PTP can run
 # inside the Core Audio driver host. Off by default; see Docs/Spikes/.
 option(BUILD_SPIKES "Build investigation spikes" OFF)
@@ -111,7 +91,6 @@ endif()
 message(STATUS "Tools configured:")
 message(STATUS "  - AES67TestSender")
 message(STATUS "  - AES67TestReceiver")
-message(STATUS "  - aes67ctl")
 message(STATUS "")
 message(STATUS "Run test sender:")
 message(STATUS "  ./Tools/AES67TestSender --ip 239.1.1.1 --port 5004 --channels 8 --freq 1000")
