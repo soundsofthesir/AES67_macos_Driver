@@ -114,6 +114,56 @@ Options:
 
 Running `setup` again with the same group replaces that stream; other streams stay.
 
+### Sending and receiving at once
+
+"AES67 Device" always has 128 inputs and 128 outputs at 48 kHz. Only channels mapped to a stream carry audio. Unmapped inputs are silent, and audio sent to unmapped outputs is dropped. Inputs and outputs are numbered separately, so a send stream and a receive stream can both start at channel 1.
+
+Stereo both ways:
+
+```bash
+sudo aes67ctl setup --interface en0 --send 239.69.1.2 --receive 239.69.1.1
+```
+
+Device outputs 1 and 2 go out on 239.69.1.2, and the stream on 239.69.1.1 arrives on device inputs 1 and 2. `setup` makes "AES67 Device" the default output but not the default input. Choose it as the input in System Settings > Sound or in the recording app.
+
+4 channels both ways:
+
+```bash
+sudo aes67ctl setup --interface en0 \
+  --send 239.69.1.2 --send-channels 4 \
+  --receive 239.69.1.1 --receive-channels 4
+```
+
+To add a receive stream to an existing setup without changing the send stream:
+
+```bash
+sudo aes67ctl add receive 239.69.1.1 --interface en0 --channels 4
+```
+
+Use your receiver's group for `--send` and your sender's group for `--receive`. `aes67ctl list` shows the resulting channel mapping.
+
+To use the 4 channels in REAPER:
+
+1. In Preferences > Audio > Device, choose CoreAudio, then "AES67 Device", at 48000 Hz.
+2. Set the input range and output range to channels 1 to 4, so track menus don't list all 128.
+3. Set a track's input to Input 1 (mono) or Inputs 1/2 (stereo) to record from the network. Route a track or the master to hardware outputs 1 to 4 to send.
+
+Because `setup` makes "AES67 Device" the default output, macOS system sound also plays on outputs 1 and 2. To keep it off the stream, set the Mac's output back to your speakers in System Settings > Sound.
+
+### Seeing which channels and addresses are in use
+
+`aes67ctl list` prints one line per stream: direction, multicast group and port, channel count, device channels, interface and session name. After the 4-channel example above:
+
+```
+$ aes67ctl list
+send     239.69.1.2:5004  4 ch  outputs 1-4  en0  Studio-Mac out
+receive  239.69.1.1:5004  4 ch  inputs 1-4  en0  Studio-Mac in
+```
+
+`aes67ctl status` prints the same mapping with packets per second and peak level for each group, which shows which streams are carrying audio.
+
+A send stream's source address is the IPv4 address of its interface (`ipconfig getifaddr en0`). Neither command shows the address of the device sending a receive stream.
+
 | Command | What it does |
 |---|---|
 | `aes67ctl status` | PTP lock since Core Audio started, then packets per second and peak level on each stream's group. It only listens. |
