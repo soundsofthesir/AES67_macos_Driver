@@ -76,7 +76,7 @@ Install from the build directory. This copies the driver, `aes67ctl` and the Man
 sudo cmake --install .
 ```
 
-`Installer/build-installer.sh` builds the same install as a .pkg.
+`Installer/build-installer.sh --build` builds the same install as a .pkg, without the Manager app. [Installer/README.md](Installer/README.md) covers signing and notarization.
 
 The device appears as "AES67 Device" in Audio MIDI Setup, with 128 inputs and 128 outputs.
 

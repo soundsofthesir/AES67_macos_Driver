@@ -3,88 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-            font-size: 13px;
-            line-height: 1.6;
-            padding: 20px;
-        }
-        h1 {
-            font-size: 24px;
-            font-weight: 600;
-            margin-bottom: 10px;
-        }
-        h2 {
-            font-size: 18px;
-            font-weight: 600;
-            margin-top: 20px;
-            margin-bottom: 10px;
-        }
-        .warning {
-            background-color: #fff3cd;
-            border: 2px solid #ffc107;
-            border-radius: 8px;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .warning h2 {
-            color: #856404;
-            margin-top: 0;
-        }
-        ul {
-            margin: 10px 0;
-            padding-left: 25px;
-        }
-        li {
-            margin: 5px 0;
-        }
-        strong {
-            font-weight: 600;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; line-height: 1.5; padding: 20px; }
+        h1 { font-size: 20px; font-weight: 600; margin: 0 0 12px; }
+        h2 { font-size: 15px; font-weight: 600; margin: 20px 0 6px; }
+        ul { margin: 6px 0; padding-left: 22px; }
+        li { margin: 3px 0; }
+        code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
     </style>
 </head>
 <body>
-    <h1>Welcome to AES67 macOS Audio Driver Installer</h1>
+    <h1>AES67 Driver</h1>
+    <p>Adds "AES67 Device" to Core Audio: 128 inputs and 128 outputs carried as AES67 streams on the network.</p>
+    <p>This is an experimental pre-release. It has been tested with only a few devices. Don't rely on it for a live show.</p>
 
-    <p>This installer will install the AES67 network audio driver on your Mac, enabling your system to send and receive audio over IP networks using the AES67, RAVENNA, and Dante protocols.</p>
-
-    <div class="warning">
-        <h2>⚠️ EXPERIMENTAL SOFTWARE WARNING</h2>
-        <p><strong>This is alpha/beta software that has NOT been tested with real AES67 hardware.</strong></p>
-        <p>By proceeding with this installation, you acknowledge that:</p>
-        <ul>
-            <li>This driver may <strong>NOT work</strong> with real AES67/Dante devices</li>
-            <li>The driver has only been validated with unit tests</li>
-            <li>It has <strong>NOT been tested</strong> in production environments</li>
-            <li>It may cause system instability or crashes</li>
-            <li>It is <strong>NOT recommended</strong> for production use</li>
-            <li>You use this software <strong>at your own risk</strong></li>
-        </ul>
-        <p><strong>This software is intended for development, testing, and experimentation only.</strong></p>
-    </div>
-
-    <h2>What Will Be Installed:</h2>
+    <h2>Installs</h2>
     <ul>
-        <li><strong>AES67Driver.driver</strong> - Core Audio driver bundle</li>
-        <li>Location: <code>/Library/Audio/Plug-Ins/HAL/</code></li>
-        <li>The driver will appear as "AES67 Device" in your system</li>
+        <li><code>/Library/Audio/Plug-Ins/HAL/AES67Driver.driver</code></li>
+        <li><code>/usr/local/bin/aes67ctl</code></li>
+        <li>The <code>com.aes67driver.keepalive</code> background service, which keeps send streams running while no app plays</li>
     </ul>
 
-    <h2>System Requirements:</h2>
-    <ul>
-        <li>macOS 13.0 (Ventura) or later</li>
-        <li>Apple Silicon (M1/M2/M3) Mac recommended</li>
-        <li>At least 50MB free disk space</li>
-        <li>Administrator privileges required</li>
-    </ul>
-
-    <h2>During Installation:</h2>
-    <ul>
-        <li>Core Audio will be restarted</li>
-        <li>All audio applications will be briefly interrupted</li>
-        <li>Close any audio applications before proceeding</li>
-    </ul>
-
-    <p><strong>Click Continue to proceed with installation, or Quit to cancel.</strong></p>
+    <p>Core Audio restarts at the end of the install, which briefly interrupts any app playing or recording sound.</p>
 </body>
 </html>

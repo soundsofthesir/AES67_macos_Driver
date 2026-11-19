@@ -1,266 +1,132 @@
 #!/bin/bash
 #
 # build-installer.sh
-# AES67 macOS Driver - Installer Package Builder
-# Creates a macOS .pkg installer for the AES67 audio driver
+# Builds the .pkg that installs the driver, aes67ctl and the keepalive
+# LaunchDaemon (the daemon is written by scripts/configure-driver).
+#
+#   ./build-installer.sh            package what is already built
+#   ./build-installer.sh --build    rebuild first (incrementally)
+#
+# Signing is automatic when the keychain has the certificates:
+#   "Developer ID Application"  signs the driver and aes67ctl
+#   "Developer ID Installer"    signs the .pkg
+# Set DEVELOPER_ID_APP / DEVELOPER_ID_INSTALLER to pick one when there are
+# several. Notarization runs when NOTARY_PROFILE names a profile made with
+#   xcrun notarytool store-credentials <profile> --apple-id ... --team-id ...
+# A release must be signed and notarized; set REQUIRE_SIGNING=1 to fail
+# instead of building an unsigned package.
 #
 
-set -e  # Exit on error
+set -euo pipefail
 
-echo "========================================"
-echo "AES67 Driver Installer Package Builder"
-echo "========================================"
-echo ""
-
-# Paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_ROOT/build"
-INSTALLER_DIR="$SCRIPT_DIR"
-OUTPUT_DIR="$INSTALLER_DIR/output"
-PAYLOAD_DIR="$INSTALLER_DIR/payload"
-SCRIPTS_DIR="$INSTALLER_DIR/scripts"
+OUTPUT_DIR="$SCRIPT_DIR/output"
+PAYLOAD_DIR="$SCRIPT_DIR/payload"
+SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 
-# --build flag: build missing artifacts before packaging
-if [ "$1" = "--build" ]; then
-    echo "Auto-building artifacts..."
-    echo ""
+DRIVER_NAME="AES67Driver.driver"
+DRIVER_BUILD_PATH="$BUILD_DIR/$DRIVER_NAME"
+CTL_BUILD_PATH="$BUILD_DIR/aes67ctl"
 
-    if [ ! -d "$BUILD_DIR/AES67Driver.driver" ]; then
-        echo "Building driver..."
-        mkdir -p "$BUILD_DIR"
-        (cd "$BUILD_DIR" && cmake .. -DCMAKE_BUILD_TYPE=Release && make AES67Driver)
-        echo ""
-    fi
-
-    if [ ! -x "$BUILD_DIR/aes67ctl" ]; then
-        echo "Building aes67ctl..."
-        cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
-        cmake --build "$BUILD_DIR" --target aes67ctl
-        echo ""
-    fi
-
-    if [ ! -d "$PROJECT_ROOT/ManagerApp/AES67Manager.app" ]; then
-        echo "Building Manager app..."
-        (cd "$PROJECT_ROOT/ManagerApp" && ./build.sh)
-        echo ""
-    fi
-fi
-
-# Package info
 PACKAGE_ID="com.aes67.driver"
 # 0.1.0 from VERSION.txt's "0.1.0-build.19"
 PACKAGE_VERSION="$(sed -E 's/-build\.[0-9]+//' "$PROJECT_ROOT/VERSION.txt" | tr -d '[:space:]')"
-PACKAGE_NAME="AES67Driver-${PACKAGE_VERSION}-arm64.pkg"
+FINAL_PKG="$OUTPUT_DIR/AES67Driver-${PACKAGE_VERSION}-arm64.pkg"
+COMPONENT_PKG="$OUTPUT_DIR/AES67Driver.pkg"
 
-# Driver info
-DRIVER_NAME="AES67Driver.driver"
-DRIVER_BUILD_PATH="$BUILD_DIR/$DRIVER_NAME"
+fail() { echo "ERROR: $1" >&2; exit 1; }
 
-# Manager app info
-MANAGER_APP_NAME="AES67Manager.app"
-MANAGER_APP_PATH="$PROJECT_ROOT/ManagerApp/$MANAGER_APP_NAME"
+# First valid identity whose name starts with $1, or "". $2 is an optional
+# find-identity policy (-p codesigning); installer certificates need none.
+find_identity() {
+    security find-identity -v ${2:+"$2"} 2>/dev/null \
+        | sed -nE "s/.*\"($1[^\"]*)\".*/\1/p" | head -1
+}
 
-echo "Configuration:"
-echo "  Project root: $PROJECT_ROOT"
-echo "  Build dir: $BUILD_DIR"
-echo "  Package ID: $PACKAGE_ID"
-echo "  Package version: $PACKAGE_VERSION"
-echo "  Output package: $PACKAGE_NAME"
-echo ""
-
-# Check if driver has been built
-if [ ! -d "$DRIVER_BUILD_PATH" ]; then
-    echo "ERROR: Driver not found at: $DRIVER_BUILD_PATH"
-    echo ""
-    echo "Please build the driver first:"
-    echo "  cd $PROJECT_ROOT"
-    echo "  mkdir -p build && cd build"
-    echo "  cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
-    echo "  make"
-    echo ""
-    exit 1
+# Rebuild so a stale binary never ships, for example an aes67ctl without the
+# keepalive command (#201).
+if [ "${1:-}" = "--build" ]; then
+    cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$BUILD_DIR" --target AES67Driver aes67ctl
 fi
 
-echo "✓ Found driver at: $DRIVER_BUILD_PATH"
+[ -d "$DRIVER_BUILD_PATH" ] || fail "driver not found at $DRIVER_BUILD_PATH (run with --build)"
+[ -x "$CTL_BUILD_PATH" ] || fail "aes67ctl not found at $CTL_BUILD_PATH (run with --build)"
+for s in preinstall postinstall configure-driver; do
+    [ -x "$SCRIPTS_DIR/$s" ] || fail "installer script missing or not executable: $SCRIPTS_DIR/$s"
+done
 
-# Command-line setup tool
-CTL_BUILD_PATH="$BUILD_DIR/aes67ctl"
-if [ ! -x "$CTL_BUILD_PATH" ]; then
-    echo "ERROR: aes67ctl not found at: $CTL_BUILD_PATH (cmake --build build --target aes67ctl)"
-    exit 1
-fi
-echo "✓ Found aes67ctl at: $CTL_BUILD_PATH"
-
-# Check if Manager app has been built
-if [ ! -d "$MANAGER_APP_PATH" ]; then
-    echo "ERROR: Manager app not found at: $MANAGER_APP_PATH"
-    echo ""
-    echo "Please build the Manager app first:"
-    echo "  cd $PROJECT_ROOT/ManagerApp"
-    echo "  ./build.sh"
-    echo ""
-    exit 1
+APP_ID="${DEVELOPER_ID_APP:-$(find_identity "Developer ID Application" "-pcodesigning")}"
+INSTALLER_ID="${DEVELOPER_ID_INSTALLER:-$(find_identity "Developer ID Installer")}"
+if [ "${REQUIRE_SIGNING:-0}" = "1" ]; then
+    [ -n "$APP_ID" ] || fail "no Developer ID Application certificate"
+    [ -n "$INSTALLER_ID" ] || fail "no Developer ID Installer certificate"
+    [ -n "${NOTARY_PROFILE:-}" ] || fail "NOTARY_PROFILE is not set"
 fi
 
-echo "✓ Found Manager app at: $MANAGER_APP_PATH"
+echo "Packaging $PACKAGE_ID $PACKAGE_VERSION"
 
-# Clean and create output directories
-echo "Preparing directories..."
+# Payload mirrors the install locations.
 chmod -R u+w "$PAYLOAD_DIR" 2>/dev/null || true
 rm -rf "$OUTPUT_DIR" "$PAYLOAD_DIR"
-mkdir -p "$OUTPUT_DIR"
-mkdir -p "$PAYLOAD_DIR"
-
-# Create payload directory structure
-# The payload should mirror the final installation location
-PAYLOAD_INSTALL_DIR="$PAYLOAD_DIR/Library/Audio/Plug-Ins/HAL"
-PAYLOAD_APPS_DIR="$PAYLOAD_DIR/Applications"
-mkdir -p "$PAYLOAD_INSTALL_DIR"
-mkdir -p "$PAYLOAD_APPS_DIR"
-
-# Copy driver to payload
-echo "Copying driver to payload..."
-cp -R "$DRIVER_BUILD_PATH" "$PAYLOAD_INSTALL_DIR/"
-
-# Verify driver payload
-if [ ! -d "$PAYLOAD_INSTALL_DIR/$DRIVER_NAME" ]; then
-    echo "ERROR: Failed to copy driver to payload"
-    exit 1
-fi
-
-echo "✓ Driver copied to payload"
-
-# Copy aes67ctl to payload
-mkdir -p "$PAYLOAD_DIR/usr/local/bin"
+mkdir -p "$OUTPUT_DIR" "$PAYLOAD_DIR/Library/Audio/Plug-Ins/HAL" "$PAYLOAD_DIR/usr/local/bin"
+cp -R "$DRIVER_BUILD_PATH" "$PAYLOAD_DIR/Library/Audio/Plug-Ins/HAL/"
 cp "$CTL_BUILD_PATH" "$PAYLOAD_DIR/usr/local/bin/"
-echo "✓ aes67ctl copied to payload"
+# Drop quarantine and other extended attributes. com.apple.provenance is
+# protected and stays; pkgutil lists it as ._ entries, which install as
+# attributes, not files.
+xattr -cr "$PAYLOAD_DIR"
 
-# Copy Manager app to payload
-echo "Copying Manager app to payload..."
-cp -R "$MANAGER_APP_PATH" "$PAYLOAD_APPS_DIR/"
-
-# Verify Manager app payload
-if [ ! -d "$PAYLOAD_APPS_DIR/$MANAGER_APP_NAME" ]; then
-    echo "ERROR: Failed to copy Manager app to payload"
-    exit 1
+if [ -n "$APP_ID" ]; then
+    echo "Signing binaries with: $APP_ID"
+    for target in "$PAYLOAD_DIR/usr/local/bin/aes67ctl" \
+                  "$PAYLOAD_DIR/Library/Audio/Plug-Ins/HAL/$DRIVER_NAME"; do
+        codesign --force --options runtime --timestamp --sign "$APP_ID" "$target"
+        codesign --verify --strict "$target"
+    done
 fi
-
-echo "✓ Manager app copied to payload"
-
-# Check scripts exist and are executable
-echo "Checking installer scripts..."
-
-if [ ! -f "$SCRIPTS_DIR/preinstall" ]; then
-    echo "ERROR: preinstall script not found at: $SCRIPTS_DIR/preinstall"
-    exit 1
-fi
-
-if [ ! -f "$SCRIPTS_DIR/postinstall" ]; then
-    echo "ERROR: postinstall script not found at: $SCRIPTS_DIR/postinstall"
-    exit 1
-fi
-
-if [ ! -x "$SCRIPTS_DIR/preinstall" ]; then
-    echo "Making preinstall script executable..."
-    chmod +x "$SCRIPTS_DIR/preinstall"
-fi
-
-if [ ! -x "$SCRIPTS_DIR/postinstall" ]; then
-    echo "Making postinstall script executable..."
-    chmod +x "$SCRIPTS_DIR/postinstall"
-fi
-
-echo "✓ Installer scripts ready"
-
-# Build component package with pkgbuild
-echo ""
-echo "Building component package..."
-
-COMPONENT_PKG="$OUTPUT_DIR/AES67Driver.pkg"
 
 pkgbuild \
     --root "$PAYLOAD_DIR" \
-    --component-plist "$INSTALLER_DIR/component.plist" \
+    --component-plist "$SCRIPT_DIR/component.plist" \
     --identifier "$PACKAGE_ID" \
     --version "$PACKAGE_VERSION" \
     --scripts "$SCRIPTS_DIR" \
     --install-location "/" \
     "$COMPONENT_PKG"
 
-if [ ! -f "$COMPONENT_PKG" ]; then
-    echo "ERROR: Failed to create component package"
-    exit 1
+DIST_XML="$OUTPUT_DIR/Distribution.xml"
+sed "s/@PACKAGE_VERSION@/$PACKAGE_VERSION/" "$SCRIPT_DIR/Distribution.xml" > "$DIST_XML"
+
+PRODUCT_SIGN_ARGS=()
+if [ -n "$INSTALLER_ID" ]; then
+    echo "Signing package with: $INSTALLER_ID"
+    PRODUCT_SIGN_ARGS=(--sign "$INSTALLER_ID" --timestamp)
+fi
+productbuild \
+    --distribution "$DIST_XML" \
+    --package-path "$OUTPUT_DIR" \
+    --resources "$SCRIPT_DIR" \
+    ${PRODUCT_SIGN_ARGS[@]+"${PRODUCT_SIGN_ARGS[@]}"} \
+    "$FINAL_PKG"
+rm -f "$COMPONENT_PKG" "$DIST_XML"
+
+if [ -n "$INSTALLER_ID" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+    echo "Notarizing..."
+    xcrun notarytool submit "$FINAL_PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$FINAL_PKG"
+    spctl --assess --type install -vv "$FINAL_PKG"
 fi
 
-echo "✓ Component package created: $COMPONENT_PKG"
-
-# Build product package with productbuild
 echo ""
-echo "Building product package..."
-
-FINAL_PKG="$OUTPUT_DIR/$PACKAGE_NAME"
-
-# Check if Distribution.xml exists
-if [ -f "$INSTALLER_DIR/Distribution.xml" ]; then
-    echo "Using Distribution.xml..."
-
-    productbuild \
-        --distribution "$INSTALLER_DIR/Distribution.xml" \
-        --package-path "$OUTPUT_DIR" \
-        --resources "$INSTALLER_DIR" \
-        "$FINAL_PKG"
+echo "Package: $FINAL_PKG"
+pkgutil --payload-files "$FINAL_PKG" | grep -E 'aes67ctl$|\.driver$'
+if [ -z "$INSTALLER_ID" ]; then
+    echo "UNSIGNED: no Developer ID Installer certificate in the keychain."
+elif [ -z "${NOTARY_PROFILE:-}" ]; then
+    echo "Signed but NOT notarized: set NOTARY_PROFILE to notarize."
 else
-    echo "No Distribution.xml found, creating simple package..."
-
-    # Create simple product package without distribution file
-    productbuild \
-        --package "$COMPONENT_PKG" \
-        "$FINAL_PKG"
+    echo "Signed, notarized and stapled."
 fi
-
-if [ ! -f "$FINAL_PKG" ]; then
-    echo "ERROR: Failed to create final package"
-    exit 1
-fi
-
-echo "✓ Product package created: $FINAL_PKG"
-
-# Get package size
-PKG_SIZE=$(du -h "$FINAL_PKG" | awk '{print $1}')
-
-echo ""
-echo "========================================"
-echo "Package Build Complete!"
-echo "========================================"
-echo ""
-echo "Output package:"
-echo "  Location: $FINAL_PKG"
-echo "  Size: $PKG_SIZE"
-echo ""
-echo "Package contents:"
-pkgutil --payload-files "$FINAL_PKG" | head -10
-echo ""
-echo "To install (requires sudo):"
-echo "  sudo installer -pkg \"$FINAL_PKG\" -target /"
-echo ""
-echo "Or double-click the package to install via GUI."
-echo ""
-
-# Optional: Sign the package
-echo "========================================"
-echo "Code Signing"
-echo "========================================"
-echo ""
-echo "This package is UNSIGNED."
-echo ""
-echo "To sign the package, you need an Apple Developer certificate."
-echo "See the code signing documentation for details."
-echo ""
-echo "To sign manually:"
-echo "  productsign --sign \"Developer ID Installer: Your Name\" \\"
-echo "    \"$FINAL_PKG\" \\"
-echo "    \"${FINAL_PKG%.pkg}-signed.pkg\""
-echo ""
-
-echo "Build complete!"
