@@ -91,7 +91,7 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // line: a young one is too rough to tell a step from its own slope
         const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
                                (settled() && (error > config_.positiveStepThresholdNs ||
-                                              (error < 0 && negativeBias())));
+                                              (error < 0 && negativeBias() && negativeDelayStepEvidence())));
         if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
             // that agree with each other confirm a step
@@ -215,6 +215,29 @@ bool Servo::negativeBias() const {
         return false;
     }
     return medianOf(recentErrors_) < -config_.negativeStepBiasNs;
+}
+
+bool Servo::negativeDelayStepEvidence() const {
+    // Sync queueing pushes Sync errors down, but it pushes the reciprocal
+    // Delay_Req residual up. A real master-time step moves both down. Compare
+    // recent fixed delay-pair residuals with the preceding history so ordinary
+    // path delay and queueing do not look like a step.
+    const size_t recentCount = config_.stepConfirmSamples;
+    const size_t baselineCount = config_.stepBiasSamples;
+    if (delays_.size() < recentCount + baselineCount) return false;
+
+    std::deque<double> baseline;
+    std::deque<double> recent;
+    const size_t baselineStart = delays_.size() - recentCount - baselineCount;
+    for (size_t i = baselineStart; i < baselineStart + baselineCount; ++i) {
+        if (!delays_[i].twiceDelay) return false;
+        baseline.push_back(*delays_[i].twiceDelay);
+    }
+    for (size_t i = delays_.size() - recentCount; i < delays_.size(); ++i) {
+        if (!delays_[i].twiceDelay) return false;
+        recent.push_back(*delays_[i].twiceDelay);
+    }
+    return medianOf(recent) - medianOf(baseline) < -0.5 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {

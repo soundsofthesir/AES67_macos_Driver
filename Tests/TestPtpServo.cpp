@@ -290,7 +290,7 @@ void testSmallGrandmasterStepIsFollowed() {
 }
 
 // #138: a single Sync a little above the line (not a step) must not start a
-// new timeline or drop lock: queueing never makes a Sync late, so only a
+// new timeline or drop lock: queueing never makes a Sync early, so only a
 // sustained bias counts
 void testIsolatedPositiveExcursionIsNotAStep() {
     std::cout << "Isolated Syncs 1.5 ms above the line do not start a new timeline or drop lock" << std::endl;
@@ -304,6 +304,21 @@ void testIsolatedPositiveExcursionIsNotAStep() {
     }
     CHECK(servo.generation() == 1, "isolated excursions start no new timeline (generation " << servo.generation() << ")");
     CHECK(servo.state() == Servo::State::Locked, "still locked after them (state " << int(servo.state()) << ")");
+}
+
+// #211: sustained receive queueing creates a negative Sync bias, but cannot
+// move the reciprocal Delay_Req measurements down like a master-time step.
+void testSustainedQueueBurstsAreNotSteps() {
+    std::cout << "Sustained 1-3 ms queue bursts do not start a new timeline" << std::endl;
+    Network bursty;
+    bursty.burstEverySeconds = 20.0;
+    bursty.burstSeconds = 3.0;
+    bursty.burstMinNs = 1000000.0;
+    bursty.jitterNs = 3000000.0;
+    Simulation sim(Master{}, bursty, 8.0, 19);
+    sim.runUntil(300);
+    CHECK(sim.measure().generation == 1,
+          "sustained 1-3 ms queue bursts do not change generation (" << sim.measure().generation << ")");
 }
 
 void testHoldover() {
@@ -510,6 +525,7 @@ int main() {
     testGrandmasterTimeStep();
     testSmallGrandmasterStepIsFollowed();
     testIsolatedPositiveExcursionIsNotAStep();
+    testSustainedQueueBurstsAreNotSteps();
     testHoldover();
     testHoldoverStepIsNotLocked();
     testNoHoldoverBeforeLock();
