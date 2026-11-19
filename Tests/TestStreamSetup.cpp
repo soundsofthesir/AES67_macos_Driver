@@ -148,6 +148,41 @@ void testAddRefusesOverlappingChannels() {
     CHECK(addStream(*entries, build(receiveRequest()), nullptr).has_value(), "inputs are separate from outputs");
 }
 
+void testFirstFreeChannel() {
+    std::cout << "The first free device channels are found per direction" << std::endl;
+    StreamRequest mono = receiveRequest("239.69.2.10");
+    mono.channels = 1;
+    CHECK(firstFreeChannel({}, mono) == 0, "no streams: input 1");
+
+    auto entries = addStream({}, build(mono), nullptr);
+    StreamRequest second = receiveRequest("239.69.2.11");
+    second.channels = 1;
+    CHECK(firstFreeChannel(*entries, second) == 1, "input 1 taken: input 2");
+    CHECK(firstFreeChannel(*entries, mono) == 0, "the stream being replaced frees its own channels");
+    CHECK(firstFreeChannel(*entries, sendRequest()) == 0, "outputs are separate from inputs");
+
+    StreamRequest later = receiveRequest("239.69.2.12");
+    later.channels = 1;
+    later.firstDeviceChannel = 2;  // input 3, leaving input 2 free
+    entries = addStream(*entries, build(later), nullptr);
+    CHECK(firstFreeChannel(*entries, second) == 1, "a mono stream fills the gap at input 2");
+    StreamRequest stereo = receiveRequest("239.69.2.13");
+    CHECK(firstFreeChannel(*entries, stereo) == 3, "a stereo stream skips the 1-channel gap: inputs 4-5");
+
+    SavedStreamEntry disabled{build(mono), {}};
+    disabled.config->enabled = false;
+    CHECK(firstFreeChannel({disabled}, second) == 0, "a disabled stream holds no channels");
+
+    std::vector<SavedStreamEntry> full;
+    for (int i = 0; i < 16; ++i) {
+        StreamRequest eight = receiveRequest("239.69.3." + std::to_string(i + 1));
+        eight.channels = 8;
+        eight.firstDeviceChannel = static_cast<uint16_t>(i * 8);
+        full = *addStream(full, build(eight), nullptr);
+    }
+    CHECK(!firstFreeChannel(full, second).has_value(), "all 128 inputs taken: none free");
+}
+
 void testUnreadableEntriesAreKept() {
     std::cout << "Entries this version can't read are kept as written" << std::endl;
     const std::string file = R"({"version": "1.0", "streams": [
@@ -216,6 +251,7 @@ int main() {
     testInvalidRequests();
     testAddReplacesTheSameStream();
     testAddRefusesOverlappingChannels();
+    testFirstFreeChannel();
     testUnreadableEntriesAreKept();
     testRemoveByGroup();
     testPtpFile();
