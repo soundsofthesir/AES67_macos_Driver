@@ -828,6 +828,11 @@ void StreamManager::announceTx(const StreamID& id, const ManagedStream& managed)
     sdp.originNetworkType = "IN";
     sdp.originAddressType = "IP4";
     sdp.originAddress = address;
+    // Receivers filter on the source (a=source-filter), so name it only when
+    // it is known: a named interface sends from its current address (a saved
+    // one goes stale when that changes). With no interface the kernel picks
+    // the route, which can differ from `address`, so there is no filter.
+    sdp.sourceAddress = managed.networkInterface.empty() ? std::string{} : address;
     sdp.framecount = managed.transmitter->framesPerPacket();
 
     if (ptpGrandmaster_) {
