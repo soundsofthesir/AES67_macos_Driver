@@ -971,30 +971,42 @@ void testTxStreamIsAnnounced() {
 
 // A saved TX stream's sourceAddress goes stale when the interface's address
 // changes (DHCP, a cleared static IP). Receivers filter on the announced
-// source (a=source-filter), so the announcement must name the live address.
+// source (a=source-filter), so a stream on a named interface announces that
+// interface's live address. A stream with no interface leaves the route to
+// the kernel, which may not use the announced address, so it has no filter.
 void testTxAnnouncesTheLiveSourceAddress() {
-    std::cout << "TX streams announce the interface's current address as their source" << std::endl;
+    std::cout << "TX streams announce their interface's current address as the source, or none" << std::endl;
     const std::string path = useEmptyConfig("sapsource");
     const std::string address = NetworkInterfaceDetection::resolveIPv4Address("");
-    if (address.empty()) {
+    const std::string interfaceName = NetworkInterfaceDetection::getInterfaceForIPAddress(address);
+    if (address.empty() || interfaceName.empty()) {
         std::cout << "  skipped: no network interface" << std::endl;
         return;
     }
-    SDPSession sdp;
-    sdp.sessionName = "SAP Source";
-    sdp.connectionAddress = "239.69.99.10";
-    sdp.port = 55034;
-    sdp.ttl = 0;
-    sdp.encoding = "L24";
-    sdp.payloadType = 97;
-    sdp.sampleRate = 48000;
-    sdp.numChannels = 2;
-    sdp.ptime = 1;
-    sdp.framecount = 48;
-    sdp.direction = "sendonly";
-    sdp.sessionID = 4242;
-    sdp.sourceAddress = "192.0.2.77";  // TEST-NET-1: never this Mac's address
-    std::ofstream(path) << StreamConfigManager::toJSON({StreamConfigManager::createConfig(sdp, makeMapping(2, 0))});
+    const auto savedStream = [](const std::string& name, const std::string& group, uint16_t port,
+                                uint16_t deviceStart, const std::string& networkInterface) {
+        SDPSession sdp;
+        sdp.sessionName = name;
+        sdp.connectionAddress = group;
+        sdp.port = port;
+        sdp.ttl = 0;
+        sdp.encoding = "L24";
+        sdp.payloadType = 97;
+        sdp.sampleRate = 48000;
+        sdp.numChannels = 2;
+        sdp.ptime = 1;
+        sdp.framecount = 48;
+        sdp.direction = "sendonly";
+        sdp.sessionID = 4242 + port;
+        sdp.sourceAddress = "192.0.2.77";  // TEST-NET-1: never this Mac's address
+        PersistedStreamConfig config = StreamConfigManager::createConfig(sdp, makeMapping(2, deviceStart));
+        config.networkInterface = networkInterface;
+        return config;
+    };
+    std::ofstream(path) << StreamConfigManager::toJSON({
+        savedStream("SAP Source Named", "239.69.99.10", 55034, 0, interfaceName),
+        savedStream("SAP Source Default", "239.69.99.11", 55036, 2, ""),
+    });
 
     SapCapture capture("239.255.255.255", kTestSapPort, address);
     RxHarness harness;
@@ -1002,15 +1014,24 @@ void testTxAnnouncesTheLiveSourceAddress() {
     const TxContext txContext{harness.clock, txRouting};
     {
         StreamManager manager(harness.context(), txContext, testSap());
-        CHECK(manager.loadSavedStreams(), "the saved TX stream should load");
-        TestWait::waitUntil([&] { return !announcedSessions(capture.packets(), "SAP Source").empty(); },
-                            std::chrono::milliseconds(2000));
+        CHECK(manager.loadSavedStreams(), "the saved TX streams should load");
+        TestWait::waitUntil([&] {
+            const auto packets = capture.packets();
+            return !announcedSessions(packets, "SAP Source Named").empty() &&
+                   !announcedSessions(packets, "SAP Source Default").empty();
+        }, std::chrono::milliseconds(2000));
     }
-    const auto sessions = announcedSessions(capture.packets(), "SAP Source");
-    CHECK(!sessions.empty(), "the stream should be announced");
-    if (!sessions.empty()) {
-        CHECK(sessions.front().sourceAddress == address,
-              "the source filter names the live address " << address << " (got " << sessions.front().sourceAddress << ")");
+    const auto named = announcedSessions(capture.packets(), "SAP Source Named");
+    const auto unnamed = announcedSessions(capture.packets(), "SAP Source Default");
+    CHECK(!named.empty() && !unnamed.empty(), "both streams should be announced");
+    if (!named.empty()) {
+        CHECK(named.front().sourceAddress == address,
+              "on " << interfaceName << " the source filter names the live address " << address << " (got "
+                    << named.front().sourceAddress << ")");
+    }
+    if (!unnamed.empty()) {
+        CHECK(unnamed.front().sourceAddress.empty(),
+              "with no interface there is no source filter (got " << unnamed.front().sourceAddress << ")");
     }
 }
 
