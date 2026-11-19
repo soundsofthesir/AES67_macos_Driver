@@ -17,7 +17,10 @@
 #include "PacketProbe.h"
 #include "System.h"
 #include "../../NetworkEngine/StreamSetup.h"
+#include <fcntl.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstring>
 #include <cstdio>
 #include <iostream>
 #include <map>
@@ -129,16 +132,42 @@ bool checkInterface(const std::string& name) {
     return false;
 }
 
+/// The streams file's entries ({} if there is none). Read here rather than
+/// with StreamConfigManager::loadConfig: that copies a corrupt file to .bak,
+/// and as root in a directory _coreaudiod can write, a planted .bak symlink
+/// would aim that copy anywhere. Symlinks are refused.
+/// Groups go to `route` as arguments: only plain multicast addresses pass.
+bool checkGroups(const std::vector<std::string>& groups) {
+    for (const auto& group : groups) {
+        if (!Setup::isMulticastIPv4(group)) {
+            std::cerr << "not an IPv4 multicast address: " << group << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<std::vector<SavedStreamEntry>> loadStreams() {
-    StreamConfigManager manager;
-    manager.setConfigPath(streamsPath());
-    LoadedStreamConfig loaded = manager.loadConfig();
-    if (loaded.status == LoadedStreamConfig::Status::Corrupt) {
-        std::cerr << streamsPath() << " is not a streams file; fix or remove it (a copy is at "
-                  << streamsPath() << ".bak)" << std::endl;
+    const std::string path = streamsPath();
+    const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return std::vector<SavedStreamEntry>{};
+        std::cerr << "can't read " << path << ": " << std::strerror(errno) << std::endl;
         return std::nullopt;
     }
-    return std::move(loaded.entries);
+    std::string text;
+    char buffer[4096];
+    ssize_t n = 0;
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0 || (n < 0 && errno == EINTR)) {
+        if (n > 0) text.append(buffer, static_cast<size_t>(n));
+    }
+    close(fd);
+    auto entries = StreamConfigManager::fromJSON(text);
+    if (!entries) {
+        std::cerr << path << " is not a streams file; fix or remove it" << std::endl;
+        return std::nullopt;
+    }
+    return entries;
 }
 
 bool saveStreams(const std::vector<SavedStreamEntry>& entries) {
@@ -209,7 +238,9 @@ int status() {
         probes.emplace_back([&, i] {
             const PersistedStreamConfig& s = *streams[i];
             const std::string address = interfaceInfo(s.networkInterface).ipv4;
-            if (!address.empty()) results[i] = probe(s.sdp.connectionAddress, s.sdp.port, address, kProbeTime);
+            if (!address.empty() && Setup::isMulticastIPv4(s.sdp.connectionAddress)) {
+                results[i] = probe(s.sdp.connectionAddress, s.sdp.port, address, kProbeTime);
+            }
         });
     }
     for (auto& t : probes) t.join();
@@ -218,11 +249,14 @@ int status() {
     for (size_t i = 0; i < streams.size(); ++i) {
         const PersistedStreamConfig& s = *streams[i];
         const bool send = Setup::directionOf({s, {}}) == Setup::Direction::Send;
-        allSending = allSending && (!send || results[i].packets > 0);
+        const bool probed = !s.networkInterface.empty();
+        allSending = allSending && (!send || !probed || results[i].packets > 0);
         std::cout << (send ? "send     " : "receive  ") << s.sdp.connectionAddress << "  " << s.sdp.numChannels
                   << " ch  " << (send ? "outputs " : "inputs ")
-                  << channelRange(s.mapping.deviceChannelStart, s.sdp.numChannels) << "  " << s.networkInterface
-                  << "  " << describeProbe(s, results[i]) << std::endl;
+                  << channelRange(s.mapping.deviceChannelStart, s.sdp.numChannels) << "  "
+                  << (probed ? s.networkInterface + "  " + describeProbe(s, results[i])
+                             : std::string("default interface, not probed"))
+                  << std::endl;
     }
     if (streams.empty()) std::cout << "no streams in " << streamsPath() << std::endl;
     std::cout << "output   " << (isDefaultOutput() ? "AES67 Device is the default output" : "AES67 Device is not the default output")
@@ -251,10 +285,13 @@ int doctor(const Args& args) {
     const std::string name = args.value("--interface");
     if (!name.empty() && !checkInterface(name)) return kUsage;
     std::vector<std::string> groups = args.all("--group");
+    if (!checkGroups(groups)) return kUsage;
     if (groups.empty()) {
         if (const auto entries = loadStreams()) {
             for (const auto& entry : *entries) {
-                if (entry.config) groups.push_back(entry.config->sdp.connectionAddress);
+                if (entry.config && Setup::isMulticastIPv4(entry.config->sdp.connectionAddress)) {
+                    groups.push_back(entry.config->sdp.connectionAddress);
+                }
             }
         }
     }
@@ -303,6 +340,11 @@ int setup(const Args& args) {
         std::cerr << "give --send, --receive or both" << std::endl;
         return kUsage;
     }
+    std::vector<std::string> groups;
+    for (const auto& group : {sendGroup, receiveGroup}) {
+        if (!group.empty()) groups.push_back(group);
+    }
+    if (!checkGroups(groups)) return kUsage;
 
     Setup::StreamRequest send = baseRequest(Setup::Direction::Send, sendGroup, name);
     Setup::StreamRequest receive = baseRequest(Setup::Direction::Receive, receiveGroup, name);
@@ -315,10 +357,6 @@ int setup(const Args& args) {
     }
     if (needsRoot()) return kFailed;
 
-    std::vector<std::string> groups;
-    for (const auto& group : {sendGroup, receiveGroup}) {
-        if (!group.empty()) groups.push_back(group);
-    }
     const auto findings = diagnose(gatherFacts(name, groups));
     printFindings(findings);
     if (hasFailure(findings)) return kFailed;
@@ -328,16 +366,22 @@ int setup(const Args& args) {
     if ((!sendGroup.empty() && !addTo(*entries, send)) || (!receiveGroup.empty() && !addTo(*entries, receive))) {
         return kFailed;
     }
-    if (!saveStreams(*entries)) return kFailed;
+    // ptp.json first: if streams.json then fails, nothing that changes what
+    // the driver sends has been written
     const bool ptpOn = !args.has("--no-ptp");
     if (ptpOn) {
         std::string error;
-        if (!writeFile(ptpPath(), Setup::ptpFileText(name, ptpDomain, args.has("--ptp-hybrid")), &error)) {
+        if (!prepareConfigDirectory(&error) ||
+            !writeFile(ptpPath(), Setup::ptpFileText(name, ptpDomain, args.has("--ptp-hybrid")), &error)) {
             std::cerr << error << std::endl;
             return kFailed;
         }
-        std::cout << "ptp      " << name << ", domain " << static_cast<int>(ptpDomain) << std::endl;
     }
+    if (!saveStreams(*entries)) {
+        if (ptpOn) std::cerr << "ptp.json was updated; streams.json was not" << std::endl;
+        return kFailed;
+    }
+    if (ptpOn) std::cout << "ptp      " << name << ", domain " << static_cast<int>(ptpDomain) << std::endl;
 
     if (args.has("--no-restart")) return kOk;
     if (!restartAndWait()) return kFailed;
@@ -357,7 +401,7 @@ int add(const Args& args) {
         return kUsage;
     }
     const std::string name = args.value("--interface");
-    if (!checkInterface(name)) return kUsage;
+    if (!checkInterface(name) || !checkGroups({args.positional[1]})) return kUsage;
     const auto direction = args.positional[0] == "send" ? Setup::Direction::Send : Setup::Direction::Receive;
     Setup::StreamRequest request = baseRequest(direction, args.positional[1], name);
     unsigned long firstChannel = 1;
@@ -380,6 +424,7 @@ int remove(const Args& args) {
         std::cerr << "usage: aes67ctl remove GROUP" << std::endl;
         return kUsage;
     }
+    if (!checkGroups(args.positional)) return kUsage;
     if (needsRoot()) return kFailed;
     auto entries = loadStreams();
     if (!entries) return kFailed;

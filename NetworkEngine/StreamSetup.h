@@ -61,6 +61,9 @@ std::string toFileText(const std::vector<SavedStreamEntry>& entries);
 /// ptp.json text for following PTP on `networkInterface`.
 std::string ptpFileText(const std::string& networkInterface, uint8_t domain, bool hybrid);
 
+/// A dotted-quad IPv4 multicast address (224.0.0.0/4), nothing looser.
+bool isMulticastIPv4(const std::string& text);
+
 /// "send"/"receive" for an entry, as the driver will treat it.
 Direction directionOf(const SavedStreamEntry& entry);
 

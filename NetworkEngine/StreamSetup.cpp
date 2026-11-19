@@ -19,12 +19,6 @@ bool fail(std::string* error, std::string message) {
     return false;
 }
 
-bool isMulticastIPv4(const std::string& text) {
-    in_addr addr{};
-    if (inet_pton(AF_INET, text.c_str(), &addr) != 1) return false;
-    return (ntohl(addr.s_addr) >> 28) == 0xE;
-}
-
 bool isIPv4(const std::string& text) {
     in_addr addr{};
     return inet_pton(AF_INET, text.c_str(), &addr) == 1;
@@ -67,6 +61,12 @@ std::string rawGroup(const SavedStreamEntry& entry) {
 }
 
 }  // namespace
+
+bool isMulticastIPv4(const std::string& text) {
+    in_addr addr{};
+    if (inet_pton(AF_INET, text.c_str(), &addr) != 1) return false;
+    return (ntohl(addr.s_addr) >> 28) == 0xE;
+}
 
 Direction directionOf(const SavedStreamEntry& entry) {
     const std::string direction = entry.config ? entry.config->sdp.direction : rawDirection(entry.raw);

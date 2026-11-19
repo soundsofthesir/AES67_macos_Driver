@@ -32,6 +32,11 @@ check "more than 8 channels is a usage error" '[ $? -eq 2 ]'
 "$CTL" add send 239.69.250.4 --interface "lo0;x" --no-restart 2>/dev/null >/dev/null
 check "an odd interface name is refused" '[ $? -eq 2 ]'
 
+"$CTL" add send -inet --interface lo0 --no-restart 2>/dev/null >/dev/null
+check "a group that isn't a multicast address is a usage error" '[ $? -eq 2 ]'
+"$CTL" doctor --group example.com 2>/dev/null >/dev/null
+check "doctor refuses a hostname as a group" '[ $? -eq 2 ]'
+
 "$CTL" remove 239.69.250.3 --no-restart >/dev/null
 check "a group is removed" '[ $? -eq 0 ] && ! "$CTL" list | grep -q 239.69.250.3'
 "$CTL" remove 239.69.250.3 --no-restart 2>/dev/null >/dev/null
@@ -40,6 +45,13 @@ check "removing an unknown group fails" '[ $? -eq 1 ]'
 echo "not json" >"$AES67_CONFIG_PATH"
 "$CTL" add send 239.69.250.5 --interface lo0 --no-restart 2>/dev/null >/dev/null
 check "a corrupt file is left alone" '[ $? -eq 1 ] && [ "$(cat "$AES67_CONFIG_PATH")" = "not json" ]'
+
+check "no backup is made of a corrupt file" '[ ! -e "$AES67_CONFIG_PATH.bak" ]'
+rm "$AES67_CONFIG_PATH"
+echo '{"version": "1.0", "streams": []}' >"$DIR/elsewhere.json"
+ln -s "$DIR/elsewhere.json" "$AES67_CONFIG_PATH"
+"$CTL" list 2>/dev/null >/dev/null
+check "a symlinked streams file is refused" '[ $? -eq 1 ]'
 
 if [ "$failures" -ne 0 ]; then
     echo "aes67ctl CLI: $failures failed"
