@@ -150,6 +150,20 @@ To use the 4 channels in REAPER:
 
 Because `setup` makes "AES67 Device" the default output, macOS system sound also plays on outputs 1 and 2. To keep it off the stream, set the Mac's output back to your speakers in System Settings > Sound.
 
+### Seeing which channels and addresses are in use
+
+`aes67ctl list` prints one line per stream: direction, multicast group and port, channel count, device channels, interface and session name. After the 4-channel example above:
+
+```
+$ aes67ctl list
+send     239.69.1.2:5004  4 ch  outputs 1-4  en0  Studio-Mac out
+receive  239.69.1.1:5004  4 ch  inputs 1-4  en0  Studio-Mac in
+```
+
+`aes67ctl status` prints the same mapping with packets per second and peak level for each group, which shows which streams are carrying audio.
+
+A send stream's source address is the IPv4 address of its interface (`ipconfig getifaddr en0`). Neither command shows the address of the device sending a receive stream.
+
 | Command | What it does |
 |---|---|
 | `aes67ctl status` | PTP lock since Core Audio started, then packets per second and peak level on each stream's group. It only listens. |
