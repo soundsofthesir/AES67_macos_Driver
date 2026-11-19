@@ -72,7 +72,7 @@ When no PTP grandmaster is present, the Mac provides the clock itself. That allo
 - **Compatibility list.** A public table of tested devices, firmware versions and results, filled in from testers' reports.
 - **Network input hardening.** The driver reads stream announcements, RTP and PTP packets from any device on the network inside the Mac's audio system. The SDP, RTP and PTP parsers refuse malformed fields, PTP state has fixed limits so a flood of Announce or Sync messages can't grow memory, and one malformed RTP packet can't cause the next good one to be dropped. CI replays a fuzz corpus on every change and fuzzes each parser nightly.
 - **Failures inside coreaudiod.** A C++ exception in a Core Audio callback, such as a failed allocation, now returns an error instead of terminating coreaudiod, and a start that fails partway is rolled back ([#147](https://github.com/soundsofthesir/AES67_macos_Driver/issues/147)).
-- **Smaller fixes.** Transmit stalls while no app uses the device ([#25](https://github.com/soundsofthesir/AES67_macos_Driver/issues/25)), DSCP marking for PTP and RTP ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)), and checking a stream's clock against the grandmaster ([#49](https://github.com/soundsofthesir/AES67_macos_Driver/issues/49)).
+- **Smaller fixes.** DSCP marking for PTP and RTP ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)), and checking a stream's clock against the grandmaster ([#49](https://github.com/soundsofthesir/AES67_macos_Driver/issues/49)).
 - **Resampling (optional).** For senders that run on a different clock and can't follow PTP ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 
 ## Not planned for now
@@ -94,7 +94,7 @@ These matter for broadcast facilities, which usually buy certified products. The
 
 Testing with real hardware helps most. Receiving from a device into the Mac is the most complete path today.
 
-1. Build current `main`. It has mostly been tested on Apple Silicon, so Intel results are useful too.
+1. Install the latest [pre-release](https://github.com/soundsofthesir/AES67_macos_Driver/releases), or build current `main`. It has mostly been tested on Apple Silicon, so Intel results are useful too.
 2. Open an issue with your device and firmware version, your macOS version, the stream's SDP (the `a=`, `c=` and `m=` lines are enough), and what you heard.
 3. Include the driver's log from around the time of the problem:
 
