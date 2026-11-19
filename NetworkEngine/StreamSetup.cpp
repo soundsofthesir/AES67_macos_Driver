@@ -73,6 +73,13 @@ Direction directionOf(const SavedStreamEntry& entry) {
     return (direction == "sendonly" || direction == "sendrecv") ? Direction::Send : Direction::Receive;
 }
 
+bool hasEnabledSend(const std::vector<SavedStreamEntry>& entries) {
+    for (const auto& entry : entries) {
+        if (entry.config && entry.config->enabled && directionOf(entry) == Direction::Send) return true;
+    }
+    return false;
+}
+
 std::optional<PersistedStreamConfig> buildStream(const StreamRequest& request,
                                                  const std::string& interfaceAddress,
                                                  std::string* error) {

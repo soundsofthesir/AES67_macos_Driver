@@ -67,5 +67,9 @@ bool isMulticastIPv4(const std::string& text);
 /// "send"/"receive" for an entry, as the driver will treat it.
 Direction directionOf(const SavedStreamEntry& entry);
 
+/// Whether the driver will run a send stream from these entries: an enabled
+/// one it can read. aes67ctl keepalive keeps the device's IO running only then.
+bool hasEnabledSend(const std::vector<SavedStreamEntry>& entries);
+
 }  // namespace Setup
 }  // namespace AES67

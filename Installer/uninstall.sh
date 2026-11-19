@@ -72,6 +72,13 @@ if [ -d "$DRIVER_PATH" ]; then
     echo "✓ Driver removed"
 fi
 
+# Stop and remove the keepalive service (#201)
+if [ -f /Library/LaunchDaemons/com.aes67driver.keepalive.plist ]; then
+    launchctl bootout system/com.aes67driver.keepalive 2>/dev/null || true
+    rm -f /Library/LaunchDaemons/com.aes67driver.keepalive.plist /var/log/aes67driver-keepalive.log
+    echo "Keepalive service removed"
+fi
+
 # Remove the command-line tool
 if [ -f /usr/local/bin/aes67ctl ]; then
     rm -f /usr/local/bin/aes67ctl

@@ -216,18 +216,6 @@ if(APPLE)
         LIBRARY DESTINATION "/Library/Audio/Plug-Ins/HAL"
         BUNDLE DESTINATION "/Library/Audio/Plug-Ins/HAL"
     )
-
-    # Configure the installed driver as the .pkg does (#167). Skipped when
-    # staging into DESTDIR (CPack): the package runs it as its postinstall.
-    install(CODE "
-        if(\"\$ENV{DESTDIR}\" STREQUAL \"\")
-            execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/Installer/scripts/configure-driver\"
-                            RESULT_VARIABLE configureResult)
-            if(NOT configureResult EQUAL 0)
-                message(FATAL_ERROR \"Installer/scripts/configure-driver failed; run the install with sudo\")
-            endif()
-        endif()
-    ")
 endif()
 
 # ============================================================================
@@ -264,6 +252,19 @@ endif()
 
 if(APPLE)
     add_subdirectory(Tools/aes67ctl)
+
+    # Configure the installed driver as the .pkg does (#167). Skipped when
+    # staging into DESTDIR (CPack): the package runs it as its postinstall.
+    # Declared after aes67ctl so it's installed before its LaunchDaemon starts.
+    install(CODE "
+        if(\"\$ENV{DESTDIR}\" STREQUAL \"\")
+            execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/Installer/scripts/configure-driver\"
+                            RESULT_VARIABLE configureResult)
+            if(NOT configureResult EQUAL 0)
+                message(FATAL_ERROR \"Installer/scripts/configure-driver failed; run the install with sudo\")
+            endif()
+        endif()
+    ")
 endif()
 
 option(BUILD_TESTS "Build unit tests" ON)

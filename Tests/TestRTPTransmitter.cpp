@@ -7,6 +7,9 @@
 #include "../NetworkEngine/RTP/SimpleRTP.h"
 #include "../Driver/SDPParser.h"
 #include "../NetworkEngine/StreamChannelMapper.h"
+#include "../NetworkEngine/RTP/CriticalWait.h"
+#include "TestWait.h"
+#include <sys/resource.h>
 #include <iostream>
 #include <cassert>
 #include <vector>
@@ -413,6 +416,62 @@ bool testChannelInterleaving() {
 }
 
 //
+// Critical wait (#201)
+//
+
+static uint64_t ticksFromNanos(uint64_t ns) {
+    mach_timebase_info_data_t tb{};
+    mach_timebase_info(&tb);
+    return ns * tb.denom / tb.numer;
+}
+
+bool testCriticalWaitHonoursDeadline() {
+    std::cout << "Test: critical wait returns at, not before, its deadline... ";
+    CriticalWait wait;
+    TEST_ASSERT(wait.usesKqueue(), "kqueue should be available");
+
+    const uint64_t past = mach_absolute_time();
+    wait.until(past - ticksFromNanos(1000000));
+    TEST_ASSERT(mach_absolute_time() - past < ticksFromNanos(TestWait::timingLimit<uint64_t>(1000000, 20000000)),
+                "A deadline already passed should return at once");
+
+    for (int i = 0; i < 20; ++i) {
+        const uint64_t deadline = mach_absolute_time() + ticksFromNanos(2000000);
+        wait.until(deadline);
+        TEST_ASSERT(mach_absolute_time() >= deadline, "Should not return before the deadline");
+    }
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+// Core Audio puts the driver's process in the background band while no
+// client is running IO. There mach_wait_until was late by more than 2 ms on
+// about 19 of 20 1 ms waits; the critical timer must stay close to on time.
+bool testCriticalWaitInBackgroundBand() {
+    std::cout << "Test: critical wait stays on time in the background band... ";
+    TEST_ASSERT(setpriority(PRIO_DARWIN_THREAD, 0, PRIO_DARWIN_BG) == 0, "Should enter the background band");
+
+    CriticalWait wait;
+    constexpr int kWaits = 500;
+    int late = 0;
+    uint64_t deadline = mach_absolute_time();
+    for (int i = 0; i < kWaits; ++i) {
+        deadline += ticksFromNanos(1000000);
+        wait.until(deadline);
+        const uint64_t woke = mach_absolute_time();
+        if (woke > deadline + ticksFromNanos(2000000)) {
+            ++late;
+            deadline = woke;  // a late wake starts a new schedule, like the transmitter
+        }
+    }
+    setpriority(PRIO_DARWIN_THREAD, 0, 0);
+    std::cout << "(" << late << "/" << kWaits << " late) ";
+    TEST_ASSERT(late <= kWaits * TestWait::timingLimit(10, 30) / 100, "At most 10% of waits should be more than 2 ms late");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+//
 // Main Test Runner
 //
 
@@ -470,6 +529,12 @@ int main() {
     std::cout << "Channel Processing Tests:" << std::endl;
     std::cout << "------------------------" << std::endl;
     testChannelInterleaving();
+    std::cout << std::endl;
+
+    std::cout << "Critical Wait Tests:" << std::endl;
+    std::cout << "-------------------" << std::endl;
+    testCriticalWaitHonoursDeadline();
+    testCriticalWaitInBackgroundBand();
     std::cout << std::endl;
 
     std::cout << "========================================" << std::endl;

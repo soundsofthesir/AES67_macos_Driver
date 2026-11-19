@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Checks.h"
+#include <CoreAudio/CoreAudio.h>
 #include <chrono>
 #include <optional>
 #include <string>
@@ -40,6 +41,9 @@ bool writeFile(const std::string& path, const std::string& contents, std::string
 
 /// Restart coreaudiod so the driver reads its files again.
 bool restartCoreAudio(std::string* error);
+
+/// The driver's device, by UID, if Core Audio has it.
+std::optional<AudioObjectID> findDevice();
 
 /// Wait for the driver's device to appear; false on timeout.
 bool waitForDevice(std::chrono::seconds timeout);

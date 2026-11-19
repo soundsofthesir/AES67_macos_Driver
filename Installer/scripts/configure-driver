@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # configure-driver
-# Gives an installed driver what it needs at run time, then restarts Core
-# Audio so it loads. Run as root by the .pkg postinstall and by
+# Gives an installed driver what it needs at run time, starts the keepalive
+# LaunchDaemon, then restarts Core Audio so the driver loads. Run as root by the .pkg postinstall and by
 # `cmake --install` (#167), so both install paths end in the same state.
 #
 LOG_FILE="/var/log/aes67driver_install.log"  # root-only directory
@@ -33,6 +33,50 @@ fi
 
 chown -R root:wheel "$DRIVER_PATH" || log "WARNING: Failed to set driver ownership"
 chmod -R 755 "$DRIVER_PATH" || log "WARNING: Failed to set driver permissions"
+
+# aes67ctl keepalive keeps the device's IO running while a send stream is
+# configured; without a client running IO, macOS throttles the driver and
+# send streams skip packets (#201). Runs as nobody: it only plays silence.
+KEEPALIVE_LABEL="com.aes67driver.keepalive"
+KEEPALIVE_PLIST="/Library/LaunchDaemons/$KEEPALIVE_LABEL.plist"
+KEEPALIVE_LOG="/var/log/aes67driver-keepalive.log"
+if [ -x /usr/local/bin/aes67ctl ]; then
+    launchctl bootout "system/$KEEPALIVE_LABEL" 2>/dev/null || true
+    cat > "$KEEPALIVE_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$KEEPALIVE_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/aes67ctl</string>
+        <string>keepalive</string>
+    </array>
+    <key>UserName</key>
+    <string>nobody</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$KEEPALIVE_LOG</string>
+    <key>StandardErrorPath</key>
+    <string>$KEEPALIVE_LOG</string>
+</dict>
+</plist>
+PLIST
+    chown root:wheel "$KEEPALIVE_PLIST" && chmod 644 "$KEEPALIVE_PLIST"
+    touch "$KEEPALIVE_LOG" && chown nobody:wheel "$KEEPALIVE_LOG" && chmod 644 "$KEEPALIVE_LOG"
+    if launchctl bootstrap system "$KEEPALIVE_PLIST"; then
+        log "Keepalive service: $KEEPALIVE_LABEL"
+    else
+        log "WARNING: Failed to start $KEEPALIVE_LABEL; send streams skip packets while no app plays"
+    fi
+else
+    log "WARNING: /usr/local/bin/aes67ctl not found; keepalive service not installed"
+fi
 
 log "Restarting Core Audio..."
 # launchd starts it again (launchctl kickstart can't with SIP on)
