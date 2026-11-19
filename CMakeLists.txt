@@ -216,6 +216,18 @@ if(APPLE)
         LIBRARY DESTINATION "/Library/Audio/Plug-Ins/HAL"
         BUNDLE DESTINATION "/Library/Audio/Plug-Ins/HAL"
     )
+
+    # Configure the installed driver as the .pkg does (#167). Skipped when
+    # staging into DESTDIR (CPack): the package runs it as its postinstall.
+    install(CODE "
+        if(\"\$ENV{DESTDIR}\" STREQUAL \"\")
+            execute_process(COMMAND \"${CMAKE_CURRENT_SOURCE_DIR}/Installer/scripts/configure-driver\"
+                            RESULT_VARIABLE configureResult)
+            if(NOT configureResult EQUAL 0)
+                message(FATAL_ERROR \"Installer/scripts/configure-driver failed; run the install with sudo\")
+            endif()
+        endif()
+    ")
 endif()
 
 # ============================================================================
@@ -249,6 +261,10 @@ endif()
 # ============================================================================
 # Tests
 # ============================================================================
+
+if(APPLE)
+    add_subdirectory(Tools/aes67ctl)
+endif()
 
 option(BUILD_TESTS "Build unit tests" ON)
 
@@ -330,6 +346,14 @@ set(CPACK_PACKAGE_VERSION_PATCH ${VERSION_PATCH})
 if(APPLE)
     set(CPACK_GENERATOR "productbuild")
     set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+    # Install destinations are absolute (/Library/...): stage them under
+    # DESTDIR, or CPack installs onto this Mac while packaging
+    set(CPACK_SET_DESTDIR ON)
+    # The configuration the .pkg's postinstall does (#167). productbuild
+    # takes scripts per component only: everything installs as the default
+    # component, "Unspecified"
+    set(CPACK_COMPONENTS_ALL Unspecified)
+    set(CPACK_POSTFLIGHT_UNSPECIFIED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Installer/scripts/configure-driver")
 endif()
 
 include(CPack)

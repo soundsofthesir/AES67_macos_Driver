@@ -117,6 +117,38 @@ target_include_directories(TestStreamConfig PRIVATE
 
 target_compile_features(TestStreamConfig PRIVATE cxx_std_17)
 
+# Test: streams.json entries built by aes67ctl setup
+add_executable(TestStreamSetup
+    TestStreamSetup.cpp
+    ../NetworkEngine/StreamSetup.cpp
+    ../NetworkEngine/Json.cpp
+    ../NetworkEngine/StreamConfig.cpp
+    ../NetworkEngine/NetworkUtils.cpp
+    ../NetworkEngine/StreamChannelMapper.cpp
+    ../NetworkEngine/PTP/PtpSettings.cpp
+    ../Driver/SDPParser.cpp
+    ../Shared/Types.cpp
+)
+
+target_include_directories(TestStreamSetup PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestStreamSetup PRIVATE cxx_std_17)
+
+# Test: aes67ctl's checks and packet parsing
+add_executable(TestAes67ctl
+    TestAes67ctl.cpp
+    ../Tools/aes67ctl/Checks.cpp
+    ../Tools/aes67ctl/PacketProbe.cpp
+)
+
+target_include_directories(TestAes67ctl PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestAes67ctl PRIVATE cxx_std_17)
+
 # Integration Test: Multi-Stream Scenarios
 add_executable(TestMultiStream
     TestMultiStream.cpp
@@ -457,6 +489,11 @@ add_test(NAME RTPReceiver COMMAND TestRTPReceiver)
 add_test(NAME RTPTransmitter COMMAND TestRTPTransmitter)
 add_test(NAME StreamManager COMMAND TestStreamManager)
 add_test(NAME StreamConfig COMMAND TestStreamConfig)
+add_test(NAME StreamSetup COMMAND TestStreamSetup)
+add_test(NAME Aes67ctl COMMAND TestAes67ctl)
+if(TARGET aes67ctl)
+    add_test(NAME Aes67ctlCli COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/aes67ctl-cli-test.sh $<TARGET_FILE:aes67ctl>)
+endif()
 add_test(NAME MultiStream COMMAND TestMultiStream)
 add_test(NAME IntegrationAudioPath COMMAND TestIntegrationAudioPath)
 add_test(NAME SAPListener COMMAND TestSAPListener)
@@ -488,6 +525,7 @@ message(STATUS "  - TestRTPReceiver")
 message(STATUS "  - TestRTPTransmitter")
 message(STATUS "  - TestStreamManager")
 message(STATUS "  - TestStreamConfig")
+message(STATUS "  - TestStreamSetup")
 message(STATUS "  - TestMultiStream (Integration)")
 message(STATUS "  - TestIntegrationAudioPath (Integration)")
 message(STATUS "")

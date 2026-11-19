@@ -18,4 +18,4 @@ static inline void aes67_shim_log(const char* message) {
 
 #define os_log_info(log, format, message) aes67_shim_log(message)
 #define os_log_error(log, format, ...) ((void)0)
-#define os_log(log, format, ...) ((void)0)
+#define os_log(log, format, message) aes67_shim_log(message)

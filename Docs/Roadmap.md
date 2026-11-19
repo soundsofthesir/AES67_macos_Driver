@@ -13,8 +13,8 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 | Receive | Working | Fixed 8 ms latency. The device clock locks to the incoming stream and rides out short network stalls. Received a 1-channel stream from Riedel gear with no loss. |
 | Transmit | First hardware test passed | Sends continuously on the device clock (or PTP time) and announces streams over SAP. A Riedel Artist intercom plays a 1-channel stream from the Mac. Not yet tried with Dante or RAVENNA, or with more than one channel. |
 | PTP | Working on a real network, off by default | With `ptp.json` turning it on, the slave drives the device clock, receive streams are placed by PTP time, and transmitted streams are stamped with it and name the grandmaster. Locks to a real grandmaster in about 10 seconds with unicast Delay_Req. Only short runs so far ([#21](https://github.com/soundsofthesir/AES67_macos_Driver/issues/21)). |
-| Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set in `streams.json`. |
-| Install | Planned | Build from source only, with Homebrew and CMake. No downloadable installer yet. |
+| Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set with `aes67ctl` or in `streams.json`. |
+| Install | Planned | Build from source only, with Homebrew and CMake. `sudo cmake --install` installs and configures the driver and `aes67ctl`. No downloadable installer yet. |
 
 CI builds and tests every change on macOS (Release, and with AddressSanitizer and UndefinedBehaviorSanitizer) and on Linux.
 

@@ -1,87 +1,21 @@
 #!/bin/bash
 #
 # postinstall
-# AES67 macOS Driver Installer - Post-installation script
-# This script runs after the package is installed
+# AES67 macOS Driver Installer - runs after the package is installed.
 #
-# Note: The installer has already copied the driver to its destination.
-# This script sets permissions and restarts Core Audio.
-#
-
-# Don't exit on error initially - we want to log errors properly
-LOG_FILE="/tmp/aes67driver_install.log"
+LOG_FILE="/var/log/aes67driver_install.log"
 echo "=== AES67 Driver Post-Installation Script ===" | tee -a "$LOG_FILE"
 echo "Date: $(date)" | tee -a "$LOG_FILE"
 
-# Paths
-DRIVER_NAME="AES67Driver.driver"
-INSTALL_DIR="/Library/Audio/Plug-Ins/HAL"
-DRIVER_PATH="${INSTALL_DIR}/${DRIVER_NAME}"
+"$(dirname "$0")/configure-driver" || exit 1
 
-echo "Configuring AES67 Audio Driver..." | tee -a "$LOG_FILE"
+cat <<'DONE' | tee -a "$LOG_FILE"
 
-# Configuration directory. The driver runs as _coreaudiod and saves
-# streams.json by writing a temp file here and renaming it over the old one,
-# so it must own the directory (#42). Set on every install: older installers
-# made it root-owned, and the driver could not save at all.
-CONFIG_DIR="/Library/Application Support/AES67Driver"
-if [ ! -d "$CONFIG_DIR" ]; then
-    echo "Creating configuration directory: $CONFIG_DIR" | tee -a "$LOG_FILE"
-    mkdir -p "$CONFIG_DIR" || {
-        echo "WARNING: Failed to create configuration directory" | tee -a "$LOG_FILE"
-    }
-fi
-chown _coreaudiod:wheel "$CONFIG_DIR" && chmod 755 "$CONFIG_DIR" || {
-    echo "WARNING: Failed to give the driver its configuration directory; stream changes won't be saved" | tee -a "$LOG_FILE"
-}
-echo "Configuration directory: $CONFIG_DIR (owner _coreaudiod)" | tee -a "$LOG_FILE"
+The driver is installed as "AES67 Device". To send this Mac's audio to an
+AES67 stream:
 
-# Verify the installer copied the driver successfully
-if [ ! -d "$DRIVER_PATH" ]; then
-    echo "ERROR: Driver bundle not found at: $DRIVER_PATH" | tee -a "$LOG_FILE"
-    echo "The installer may have failed to copy the driver." | tee -a "$LOG_FILE"
-    exit 1
-fi
+  aes67ctl doctor --interface <interface>
+  sudo aes67ctl setup --interface <interface> --send <multicast group>
 
-echo "✓ Driver bundle found at: $DRIVER_PATH" | tee -a "$LOG_FILE"
-
-# Set ownership to root:wheel
-echo "Setting ownership to root:wheel..." | tee -a "$LOG_FILE"
-chown -R root:wheel "$DRIVER_PATH" || {
-    echo "WARNING: Failed to set ownership" | tee -a "$LOG_FILE"
-}
-
-# Set permissions: readable and executable by all, writable only by root
-echo "Setting permissions..." | tee -a "$LOG_FILE"
-chmod -R 755 "$DRIVER_PATH" || {
-    echo "WARNING: Failed to set permissions" | tee -a "$LOG_FILE"
-}
-
-echo "✓ Driver configured successfully" | tee -a "$LOG_FILE"
-
-# Restart Core Audio to load the new driver
-echo "Restarting Core Audio service..." | tee -a "$LOG_FILE"
-killall coreaudiod 2>/dev/null || true
-
-# Wait for Core Audio to restart
-sleep 2
-
-# Verify Core Audio is running
-if pgrep -x "coreaudiod" > /dev/null; then
-    echo "✓ Core Audio restarted successfully" | tee -a "$LOG_FILE"
-else
-    echo "WARNING: Core Audio may not have restarted properly" | tee -a "$LOG_FILE"
-fi
-
-echo "" | tee -a "$LOG_FILE"
-echo "=== Installation Complete ===" | tee -a "$LOG_FILE"
-echo "" | tee -a "$LOG_FILE"
-echo "The AES67 Driver has been installed." | tee -a "$LOG_FILE"
-echo "The driver should now appear as 'AES67 Device' in:" | tee -a "$LOG_FILE"
-echo "  - System Settings → Sound" | tee -a "$LOG_FILE"
-echo "  - Audio MIDI Setup" | tee -a "$LOG_FILE"
-echo "  - Your DAW's audio device settings" | tee -a "$LOG_FILE"
-echo "" | tee -a "$LOG_FILE"
-echo "Installation log saved to: $LOG_FILE" | tee -a "$LOG_FILE"
-
+DONE
 exit 0

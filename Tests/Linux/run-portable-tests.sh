@@ -53,6 +53,11 @@ run TestStreamManager   Tests/TestStreamManager.cpp Driver/SDPParser.cpp Network
 run TestStreamConfig    Tests/TestStreamConfig.cpp NetworkEngine/Json.cpp NetworkEngine/StreamConfig.cpp \
                         NetworkEngine/NetworkUtils.cpp NetworkEngine/StreamChannelMapper.cpp \
                         Driver/SDPParser.cpp Shared/Types.cpp
+run TestStreamSetup     Tests/TestStreamSetup.cpp NetworkEngine/StreamSetup.cpp NetworkEngine/Json.cpp \
+                        NetworkEngine/StreamConfig.cpp NetworkEngine/NetworkUtils.cpp \
+                        NetworkEngine/StreamChannelMapper.cpp NetworkEngine/PTP/PtpSettings.cpp \
+                        Driver/SDPParser.cpp Shared/Types.cpp
+run TestAes67ctl       Tests/TestAes67ctl.cpp Tools/aes67ctl/Checks.cpp Tools/aes67ctl/PacketProbe.cpp
 run TestRxTimestamp     Tests/TestRxTimestamp.cpp NetworkEngine/RTP/RtpPlacement.cpp \
                         NetworkEngine/Clock/TimestampedAudioBuffer.cpp
 run TestSAPListener     Tests/TestSAPListener.cpp NetworkEngine/Discovery/SAPListener.cpp

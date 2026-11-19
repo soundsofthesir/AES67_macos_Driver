@@ -42,9 +42,22 @@ inline void LogF(const char* format, ...) {
     Log(buffer);
 }
 
+// A state change worth finding later (PTP lock, a transmitter starting):
+// logged at the default level, which macOS keeps on disk. Info messages are
+// kept only in memory and are gone within hours. aes67ctl status reads these.
+inline void NoticeF(const char* format, ...) {
+    char buffer[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    os_log(Logger(), "%{public}s", buffer);
+}
+
 } // namespace Debug
 } // namespace AES67
 
 // Convenience macros
 #define AES67_LOG(msg) AES67::Debug::Log(msg)
 #define AES67_LOGF(fmt, ...) AES67::Debug::LogF(fmt, __VA_ARGS__)
+#define AES67_NOTICEF(fmt, ...) AES67::Debug::NoticeF(fmt, __VA_ARGS__)
