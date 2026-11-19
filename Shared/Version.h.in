@@ -1,0 +1,23 @@
+/// @file Version.h
+/// @brief Generated from Shared/Version.h.in by cmake/GenerateVersion.cmake.
+
+#pragma once
+
+#include <cstdint>
+
+namespace AES67 {
+
+/// "0.1.0"
+inline constexpr const char* kVersion = "@VERSION@";
+/// The build number from VERSION.txt
+inline constexpr const char* kBuildNumber = "@BUILD@";
+/// Short git commit, with "-modified" if the tree had uncommitted changes
+inline constexpr const char* kCommit = "@COMMIT@";
+/// "0.1.0 build 19 (abc1234)": what the driver reports and aes67ctl prints
+inline constexpr const char* kVersionString = "@VERSION@ build @BUILD@ (@COMMIT@)";
+
+/// The AES67 device's custom Core Audio property holding kVersionString as a
+/// CFString ('aesv'). aes67ctl version reads it.
+inline constexpr uint32_t kVersionPropertySelector = 0x61657376;
+
+}  // namespace AES67

@@ -121,6 +121,7 @@ Running `setup` again with the same group replaces that stream; other streams st
 | `sudo aes67ctl add send\|receive <group> --interface en0` | Adds one stream. `--first-channel` and `--channels` place it. |
 | `sudo aes67ctl remove <group>` | Removes the streams on a group. |
 | `sudo aes67ctl restart` | Restarts Core Audio so the driver reads its files again. |
+| `aes67ctl version` | Versions of `aes67ctl`, the installed driver and the driver Core Audio is running, with the git commit each was built from. Include it in bug reports. |
 
 `add`, `remove` and `setup` restart Core Audio when they finish. Pass `--no-restart` to make several changes, then run `restart` once. Restart as rarely as you can: on macOS 26.0.1, about 20 restarts in one session left system audio daemons using all CPU until logout.
 

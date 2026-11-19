@@ -9,6 +9,7 @@
 ///   aes67ctl restart
 ///   aes67ctl status
 ///   aes67ctl keepalive   (run by a LaunchDaemon, see KeepAlive.h)
+///   aes67ctl version
 ///
 /// The driver reads streams.json and ptp.json only when coreaudiod loads it,
 /// so commands that change them restart coreaudiod once at the end
@@ -18,6 +19,7 @@
 #include "KeepAlive.h"
 #include "PacketProbe.h"
 #include "System.h"
+#include "Version.h"
 #include "../../NetworkEngine/StreamSetup.h"
 #include <fcntl.h>
 #include <unistd.h>
@@ -54,6 +56,7 @@ const char* kUsageText = R"(usage:
   aes67ctl restart
   aes67ctl status
   aes67ctl keepalive
+  aes67ctl version
 
 Channels are 1-based in output: a 2-channel send stream from channel 1
 carries the Mac's stereo output.
@@ -284,6 +287,23 @@ int statusAfterRestart(bool ptpOn) {
 // commands
 // ---------------------------------------------------------------------------
 
+/// Prints this tool's version, the installed driver's, and the one coreaudiod
+/// is running. Installed and running differ until coreaudiod restarts.
+int version() {
+    const std::string installed = installedDriverVersion();
+    const auto running = runningDriverVersion();
+    std::cout << "aes67ctl   " << kVersionString << std::endl;
+    std::cout << "installed  " << (installed.empty() ? "not installed" : installed) << std::endl;
+    if (!running) {
+        std::cout << "running    not loaded" << std::endl;
+    } else {
+        std::cout << "running    " << (running->empty() ? "not reported (before 0.1.0)" : *running) << std::endl;
+    }
+    const bool stale = !installed.empty() && running && !running->empty() && running->rfind(installed + " (", 0) != 0;
+    if (stale) std::cout << "the installed driver loads at the next restart: sudo aes67ctl restart" << std::endl;
+    return kOk;
+}
+
 int doctor(const Args& args) {
     const std::string name = args.value("--interface");
     if (!name.empty() && !checkInterface(name)) return kUsage;
@@ -485,6 +505,7 @@ int main(int argc, char** argv) {
     if (command == "remove") return remove(*args);
     if (command == "list") return list();
     if (command == "status") return status();
+    if (command == "version" || command == "--version") return version();
     if (command == "keepalive") {
         return keepAlive([]() -> std::optional<bool> {
             const auto entries = loadStreams();

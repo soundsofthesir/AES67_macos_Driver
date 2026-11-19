@@ -12,6 +12,7 @@
 #include "../NetworkEngine/Clock/DeviceTimeline.h"
 #include "../NetworkEngine/Clock/HostTime.h"
 #include "../NetworkEngine/PTP/PtpSettings.h"
+#include "Version.h"
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <cmath>
 #include <utility>
@@ -33,13 +34,18 @@ AES67Device::AES67Device(std::shared_ptr<aspl::Context> context)
     })
     , clockRecovery_(ClockServo::Config{}, [this](uint64_t, double ratio) { ApplyRecoveredRate(ratio); })
 {
-    AES67_LOG("AES67Device constructor: Starting initialization");
+    AES67_LOGF("AES67Device constructor: Starting initialization, version %s", kVersionString);
     linkOffsetFrames_.store(LinkOffsetFramesFor(currentSampleRate_.load()));
     AES67_LOGF("AES67Device: Initial sample rate = %.0f Hz", currentSampleRate_.load());
 
     // NOTE: Cannot call InitializeStreams() here because shared_from_this()
     // won't work until the shared_ptr is fully constructed
     // InitializeStreams() will be called from Initialize() method
+
+    // coreaudiod doesn't pass kAudioObjectPropertyFirmwareVersion through to
+    // clients, but custom properties do reach them
+    RegisterCustomProperty(kVersionPropertySelector,
+                           []() -> CFStringRef { return CFStringCreateWithCString(nullptr, kVersionString, kCFStringEncodingUTF8); });
 
     AES67_LOG("AES67Device constructor: Basic initialization complete");
 }

@@ -21,6 +21,22 @@ project(AES67Driver
 
 message(STATUS "AES67 Driver Build #${VERSION_BUILD}")
 
+# Version.h: the version and the git commit, regenerated on every build so
+# aes67ctl and the driver report the commit they were built from
+set(AES67_VERSION_HEADER "${CMAKE_BINARY_DIR}/generated/Version.h")
+set(AES67_VERSION_ARGS
+    -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+    -DOUTPUT=${AES67_VERSION_HEADER}
+    -DVERSION=${PROJECT_VERSION}
+    -DBUILD=${VERSION_BUILD})
+execute_process(COMMAND ${CMAKE_COMMAND} ${AES67_VERSION_ARGS} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateVersion.cmake)
+add_custom_target(aes67_version ALL
+    COMMAND ${CMAKE_COMMAND} ${AES67_VERSION_ARGS} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateVersion.cmake
+    BYPRODUCTS ${AES67_VERSION_HEADER}
+    COMMENT "Checking Version.h"
+    VERBATIM)
+include_directories(${CMAKE_BINARY_DIR}/generated)
+
 # C++ Standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -174,6 +190,7 @@ if(APPLE)
         ${ALL_CPP_SOURCES}
         Driver/PlugInMain.cpp  # AudioServerPlugIn entry point
     )
+    add_dependencies(AES67Driver aes67_version)
 
     target_include_directories(AES67Driver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
