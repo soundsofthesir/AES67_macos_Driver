@@ -58,6 +58,13 @@ public:
         size_t holdHistory{64};
         double holdGoodFraction{0.125};
         double stepThresholdNs{10e6};    // a Sync this far off is a step candidate
+        // Queueing only delays a Sync, so a Sync this far above the line can't be
+        // queueing: a step candidate on its own. A step down is hidden by queueing
+        // (which pushes Syncs below it too), so it must show as a median bias
+        // of recent errors, past this far below the line
+        double positiveStepThresholdNs{0.5e6};
+        size_t stepBiasSamples{8};       // recent Syncs whose median error decides a bias
+        double negativeStepBiasNs{1e6};
         size_t stepConfirmSamples{3};    // consecutive agreeing candidates confirm a step
         double maxRejectedFraction{0.25};
         double maxRateErrorPpm{500.0};     // a line further from the host clock is not a real clock
@@ -122,6 +129,7 @@ private:
     double envelopeOffsetAt(uint64_t hostNs) const;  // E(h) - p0, in ns
     void updatePathDelay();
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
+    bool negativeBias() const;  // the median of recent errors is well below the line
     void judgeLock();
 
     const Config config_;
@@ -129,6 +137,7 @@ private:
     std::deque<Sample> samples_;
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
+    std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
 

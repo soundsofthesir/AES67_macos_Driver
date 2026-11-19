@@ -13,6 +13,13 @@ double nanosBetween(uint64_t later, uint64_t earlier) {
     return static_cast<double>(static_cast<int64_t>(later - earlier));
 }
 
+double medianOf(const std::deque<double>& values) {
+    std::vector<double> sorted(values.begin(), values.end());
+    std::sort(sorted.begin(), sorted.end());
+    const size_t mid = sorted.size() / 2;
+    return sorted.size() % 2 ? sorted[mid] : 0.5 * (sorted[mid - 1] + sorted[mid]);
+}
+
 } // namespace
 
 uint64_t Servo::Estimate::masterAt(uint64_t hostNs) const {
@@ -26,6 +33,7 @@ void Servo::startTimeline() {
     samples_.clear();
     delays_.clear();
     predictionErrors_.clear();
+    recentErrors_.clear();
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -74,7 +82,17 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // How far this Sync is from where the line says it should be: zero
         // for an unqueued packet, negative by its queueing otherwise
         const double error = nanosBetween(sample.master, p0_) - envelopeOffsetAt(sample.host);
-        if (std::fabs(error) > config_.stepThresholdNs) {
+        recentErrors_.push_back(error);
+        if (recentErrors_.size() > config_.stepBiasSamples) recentErrors_.pop_front();
+        // Queueing never makes a Sync early, so one well above the line is a
+        // step candidate on its own. Queueing does make Syncs late, so a step
+        // down shows only as a bias in the recent errors; while that bias
+        // lasts, every Sync below the line is a candidate. Both need a settled
+        // line: a young one is too rough to tell a step from its own slope
+        const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
+                               (settled() && (error > config_.positiveStepThresholdNs ||
+                                              (error < 0 && negativeBias())));
+        if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
             // that agree with each other confirm a step
             const bool agrees = stepCandidates_.empty() ||
@@ -191,6 +209,14 @@ bool Servo::settled() const {
            nanosBetween(samples_.back().host, samples_.front().host) >= config_.minSpanSeconds * 1e9;
 }
 
+bool Servo::negativeBias() const {
+    // Needs a full window on a settled line
+    if (recentErrors_.size() < config_.stepBiasSamples || !settled()) {
+        return false;
+    }
+    return medianOf(recentErrors_) < -config_.negativeStepBiasNs;
+}
+
 void Servo::updatePathDelay() {
     if (!haveLine_ || delays_.empty()) {
         return;
@@ -231,7 +257,9 @@ void Servo::judgeLock() {
         predicts = static_cast<double>(good) >= fraction * static_cast<double>(history);
     }
     const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
-    state_ = (enough && predicts && consistent && plausible) ? State::Locked : State::Acquiring;
+    // Recent Syncs biased off the line: the line is wrong, whatever the older predictions say
+    const bool biased = negativeBias();
+    state_ = (enough && predicts && consistent && plausible && !biased) ? State::Locked : State::Acquiring;
 }
 
 std::optional<Servo::Estimate> Servo::estimate() const {
