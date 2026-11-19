@@ -196,6 +196,19 @@ void testPtpFile() {
 
 }  // namespace
 
+void testHasEnabledSend() {
+    const SavedStreamEntry send{build(sendRequest()), {}};
+    const SavedStreamEntry receive{build(receiveRequest()), {}};
+    SavedStreamEntry disabledSend{build(sendRequest("239.69.1.3")), {}};
+    disabledSend.config->enabled = false;
+    const SavedStreamEntry unreadable{std::nullopt, {}};
+
+    CHECK(!hasEnabledSend({}), "no streams: no IO needed");
+    CHECK(!hasEnabledSend({receive}), "receive streams run only while an app uses the device");
+    CHECK(!hasEnabledSend({disabledSend, unreadable}), "the driver runs neither a disabled nor an unreadable send");
+    CHECK(hasEnabledSend({receive, send}), "an enabled send stream needs IO kept running");
+}
+
 int main() {
     testSendStreamDefaults();
     testEachStreamGetsItsOwnIDs();
@@ -206,6 +219,7 @@ int main() {
     testUnreadableEntriesAreKept();
     testRemoveByGroup();
     testPtpFile();
+    testHasEnabledSend();
     std::cout << "Stream setup: " << checksPassed << " passed, " << checksFailed << " failed" << std::endl;
     return checksFailed == 0 ? 0 : 1;
 }

@@ -6,6 +6,7 @@ add_executable(aes67ctl
     Checks.cpp
     System.cpp
     PacketProbe.cpp
+    KeepAlive.cpp
     ${CMAKE_SOURCE_DIR}/NetworkEngine/StreamSetup.cpp
     ${CMAKE_SOURCE_DIR}/NetworkEngine/StreamConfig.cpp
     ${CMAKE_SOURCE_DIR}/NetworkEngine/Json.cpp

@@ -8,12 +8,14 @@
 ///   aes67ctl list
 ///   aes67ctl restart
 ///   aes67ctl status
+///   aes67ctl keepalive   (run by a LaunchDaemon, see KeepAlive.h)
 ///
 /// The driver reads streams.json and ptp.json only when coreaudiod loads it,
 /// so commands that change them restart coreaudiod once at the end
 /// (--no-restart batches several changes).
 
 #include "Checks.h"
+#include "KeepAlive.h"
 #include "PacketProbe.h"
 #include "System.h"
 #include "../../NetworkEngine/StreamSetup.h"
@@ -51,6 +53,7 @@ const char* kUsageText = R"(usage:
   aes67ctl list
   aes67ctl restart
   aes67ctl status
+  aes67ctl keepalive
 
 Channels are 1-based in output: a 2-channel send stream from channel 1
 carries the Mac's stereo output.
@@ -482,6 +485,13 @@ int main(int argc, char** argv) {
     if (command == "remove") return remove(*args);
     if (command == "list") return list();
     if (command == "status") return status();
+    if (command == "keepalive") {
+        return keepAlive([]() -> std::optional<bool> {
+            const auto entries = loadStreams();
+            if (!entries) return std::nullopt;
+            return Setup::hasEnabledSend(*entries);
+        });
+    }
     if (command == "restart") {
         if (geteuid() != 0) {
             std::cerr << "run with sudo" << std::endl;

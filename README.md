@@ -43,7 +43,6 @@ Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), t
 ## Known limitations
 
 - Don't bridge the AES67 interface, for example with Internet Sharing. While the interface is in a bridge, macOS doesn't answer the switch's IGMP queries, so a snooping switch stops forwarding PTP and audio groups about 4 minutes after the driver joins them. PTP lock is lost and receivers drop the Mac's audio ([#197](https://github.com/soundsofthesir/AES67_macos_Driver/issues/197)).
-- While no app is using the device, Core Audio drops the driver to background priority. Send streams keep running but lose about 1 to 3% of their packets, as short gaps; with an app playing they lose none ([#201](https://github.com/soundsofthesir/AES67_macos_Driver/issues/201)).
 - Sent packets aren't DSCP-marked yet ([#48](https://github.com/soundsofthesir/AES67_macos_Driver/issues/48)).
 - Without PTP the driver follows one sender's clock, and a second sender on a different clock drifts and occasionally resyncs. With PTP the same goes for any sender that isn't on the grandmaster ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 - Received packets that arrive more than 8 ms late play as silence. So do packets that arrive on time but that the receive thread writes after Core Audio has read past them, which happens when the thread is held off the CPU. The driver counts these per stream but doesn't report the count anywhere yet.
@@ -71,7 +70,7 @@ make -j
 ctest --output-on-failure
 ```
 
-Install from the build directory. This copies the driver, `aes67ctl` and the Manager app, gives the driver its config directory, and restarts Core Audio:
+Install from the build directory. This copies the driver, `aes67ctl` and the Manager app, gives the driver its config directory, starts the keepalive service (see [Setting up a stream](#setting-up-a-stream)), and restarts Core Audio:
 
 ```bash
 sudo cmake --install .
@@ -124,6 +123,8 @@ Running `setup` again with the same group replaces that stream; other streams st
 | `sudo aes67ctl restart` | Restarts Core Audio so the driver reads its files again. |
 
 `add`, `remove` and `setup` restart Core Audio when they finish. Pass `--no-restart` to make several changes, then run `restart` once. Restart as rarely as you can: on macOS 26.0.1, about 20 restarts in one session left system audio daemons using all CPU until logout.
+
+While a send stream is configured, a background service (`com.aes67driver.keepalive`, which runs `aes67ctl keepalive`) keeps the device running and plays silence to it. Without a running client, macOS throttles the driver and send streams skip packets ([#201](https://github.com/soundsofthesir/AES67_macos_Driver/issues/201)). While it runs, the Mac doesn't go to sleep on its own, and receive streams stay joined. Its log is `/var/log/aes67driver-keepalive.log`.
 
 Receive streams join their multicast group only while an app is using the device. A switch with IGMP snooping won't forward the stream until then. Send streams start when the driver loads and send silence when nothing is playing.
 

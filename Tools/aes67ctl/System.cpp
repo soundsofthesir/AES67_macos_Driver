@@ -38,6 +38,12 @@ const char* env(const char* name) {
     return value && value[0] != '\0' ? value : nullptr;
 }
 
+AudioObjectPropertyAddress defaultOutputAddress() {
+    return {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+}
+
+}  // namespace
+
 std::optional<AudioObjectID> findDevice() {
     CFStringRef uid = CFStringCreateWithCString(nullptr, kDeviceUID, kCFStringEncodingUTF8);
     AudioObjectID device = kAudioObjectUnknown;
@@ -50,12 +56,6 @@ std::optional<AudioObjectID> findDevice() {
     if (status != noErr || device == kAudioObjectUnknown) return std::nullopt;
     return device;
 }
-
-AudioObjectPropertyAddress defaultOutputAddress() {
-    return {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-}
-
-}  // namespace
 
 int run(const std::vector<std::string>& argv, std::string* output) {
     int pipeFds[2];
