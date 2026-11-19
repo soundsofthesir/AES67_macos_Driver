@@ -357,6 +357,12 @@ int setup(const Args& args) {
     }
     if (needsRoot()) return kFailed;
 
+    // Fix the directory's owner first, so doctor doesn't warn about what setup fixes
+    std::string error;
+    if (!prepareConfigDirectory(&error)) {
+        std::cerr << error << std::endl;
+        return kFailed;
+    }
     const auto findings = diagnose(gatherFacts(name, groups));
     printFindings(findings);
     if (hasFailure(findings)) return kFailed;
@@ -370,9 +376,7 @@ int setup(const Args& args) {
     // the driver sends has been written
     const bool ptpOn = !args.has("--no-ptp");
     if (ptpOn) {
-        std::string error;
-        if (!prepareConfigDirectory(&error) ||
-            !writeFile(ptpPath(), Setup::ptpFileText(name, ptpDomain, args.has("--ptp-hybrid")), &error)) {
+        if (!writeFile(ptpPath(), Setup::ptpFileText(name, ptpDomain, args.has("--ptp-hybrid")), &error)) {
             std::cerr << error << std::endl;
             return kFailed;
         }
@@ -386,7 +390,6 @@ int setup(const Args& args) {
     if (args.has("--no-restart")) return kOk;
     if (!restartAndWait()) return kFailed;
     if (!args.has("--no-default-output")) {
-        std::string error;
         if (!setDefaultOutput(&error)) {
             std::cerr << error << std::endl;
             return kFailed;
