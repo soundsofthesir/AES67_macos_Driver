@@ -528,6 +528,10 @@ std::optional<PersistedStreamConfig> StreamConfigManager::configFromJSON(const J
 // Helper Functions
 // ============================================================================
 
+bool StreamConfigManager::writeFileAtomically(const std::string& path, const std::string& contents) {
+    return replaceFileAtomically(path, contents);
+}
+
 PersistedStreamConfig StreamConfigManager::createConfig(
     const SDPSession& sdp,
     const ChannelMapping& mapping,

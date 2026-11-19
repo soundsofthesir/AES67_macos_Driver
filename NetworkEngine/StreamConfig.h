@@ -148,6 +148,10 @@ public:
         const std::string& description = ""
     );
 
+    /// Replace `path` with `contents` atomically: a reader sees the old file
+    /// or the whole new one, and on failure the old file is untouched.
+    static bool writeFileAtomically(const std::string& path, const std::string& contents);
+
     // Get current Unix timestamp (seconds since epoch)
     static uint64_t getCurrentTimestamp();
 
