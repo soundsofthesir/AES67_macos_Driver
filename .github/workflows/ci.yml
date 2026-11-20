@@ -38,14 +38,14 @@ jobs:
           - name: thread-sanitizer
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE_THREAD=ON -DCMAKE_OSX_ARCHITECTURES=arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # libASPL isn't in Homebrew. Build the pinned release universal, so the
       # universal driver build can link it, and install into /usr/local, where
       # CMakeLists.txt looks for it.
       - name: Cache libASPL
         id: aspl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: aspl-prefix
           key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-15
@@ -99,7 +99,7 @@ jobs:
       matrix:
         cxx: [g++, clang++]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Shared/Types.h includes <uuid/uuid.h> for uuid_t; macOS has it in the SDK
       - name: Install libuuid headers
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build and run
         run: |
