@@ -34,6 +34,7 @@ void Servo::startTimeline() {
     delays_.clear();
     predictionErrors_.clear();
     recentErrors_.clear();
+    negativeStepBaselineLine_.reset();
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -82,8 +83,18 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // How far this Sync is from where the line says it should be: zero
         // for an unqueued packet, negative by its queueing otherwise
         const double error = nanosBetween(sample.master, p0_) - envelopeOffsetAt(sample.host);
+        const bool wasNegativeBiased = negativeBias();
         recentErrors_.push_back(error);
         if (recentErrors_.size() > config_.stepBiasSamples) recentErrors_.pop_front();
+        const bool isNegativeBiased = negativeBias();
+        if (!wasNegativeBiased && isNegativeBiased) {
+            // Keep the line from before this run of low Syncs. Refitting against
+            // queued Syncs can move the line and make ordinary Delay_Reqs look
+            // like corroboration of a negative clock step.
+            negativeStepBaselineLine_ = LineSnapshot{h0_, p0_, slope_, intercept_};
+        } else if (!isNegativeBiased) {
+            negativeStepBaselineLine_.reset();
+        }
         // Queueing never makes a Sync early, so one well above the line is a
         // step candidate on its own. Queueing does make Syncs late, so a step
         // down shows only as a bias in the recent errors; while that bias
@@ -228,18 +239,21 @@ bool Servo::negativeDelayStepEvidence() const {
     // congestion burst look like a step once its queue drains.
     const size_t recentCount = 1;
     const size_t baselineCount = config_.stepBiasSamples;
-    if (delays_.size() < recentCount + baselineCount) return false;
+    if (!negativeStepBaselineLine_ || delays_.size() < recentCount + baselineCount) return false;
 
-    std::deque<double> baseline;
-    std::deque<double> recent;
+    std::vector<double> baseline;
+    std::vector<double> recent;
+    const auto residual = [this](const DelayPair& d) {
+        const auto& line = *negativeStepBaselineLine_;
+        return nanosBetween(d.masterReceive, line.masterOrigin) -
+               (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
+    };
     const size_t baselineStart = delays_.size() - recentCount - baselineCount;
     for (size_t i = baselineStart; i < baselineStart + baselineCount; ++i) {
-        if (!delays_[i].twiceDelay) return false;
-        baseline.push_back(*delays_[i].twiceDelay);
+        baseline.push_back(residual(delays_[i]));
     }
     for (size_t i = delays_.size() - recentCount; i < delays_.size(); ++i) {
-        if (!delays_[i].twiceDelay) return false;
-        recent.push_back(*delays_[i].twiceDelay);
+        recent.push_back(residual(delays_[i]));
     }
     // Compare lower envelopes, not medians. When a congestion burst ends,
     // the newest Delay_Reqs return to their ordinary minimum while the

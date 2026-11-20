@@ -122,6 +122,12 @@ private:
         // settled, re-measured against each new line
         std::optional<double> twiceDelay;
     };
+    struct LineSnapshot {
+        uint64_t hostOrigin;
+        uint64_t masterOrigin;
+        double slope;
+        double intercept;
+    };
 
     void startTimeline();
     void addSample(const Sample& sample);
@@ -139,6 +145,7 @@ private:
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
     std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
+    std::optional<LineSnapshot> negativeStepBaselineLine_;
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
 
