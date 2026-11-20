@@ -34,8 +34,9 @@ void Servo::startTimeline() {
     delays_.clear();
     predictionErrors_.clear();
     recentErrors_.clear();
-    stepEvidenceBaselineLine_.reset();
-    stepEvidenceBaselineDirection_ = 0;
+    recentErrorLines_.clear();
+    negativeStepBaselineLine_.reset();
+    negativeRecoveryCooldown_ = 0;
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -84,28 +85,38 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // How far this Sync is from where the line says it should be: zero
         // for an unqueued packet, negative by its queueing otherwise
         const double error = nanosBetween(sample.master, p0_) - envelopeOffsetAt(sample.host);
-        // Capture the fitted line before a run of materially delayed Syncs
-        // can tilt it. The threshold is below the bias threshold so this is
-        // available when the full median window becomes negative.
-        const double negativeRunThreshold = 0.5 * config_.negativeStepBiasNs;
-        if (!stepEvidenceBaselineLine_ &&
-            (error < -negativeRunThreshold || error > config_.positiveStepThresholdNs)) {
-            stepEvidenceBaselineLine_ = LineSnapshot{h0_, p0_, slope_, intercept_};
-            stepEvidenceBaselineDirection_ = error < 0 ? -1 : 1;
-        } else if (error >= -negativeRunThreshold && error <= config_.positiveStepThresholdNs) {
-            stepEvidenceBaselineLine_.reset();
-            stepEvidenceBaselineDirection_ = 0;
-        }
+        const bool wasNegativeBiased = negativeBias();
         recentErrors_.push_back(error);
-        if (recentErrors_.size() > config_.stepBiasSamples) recentErrors_.pop_front();
+        recentErrorLines_.push_back(LineSnapshot{h0_, p0_, slope_, intercept_});
+        if (recentErrors_.size() > config_.stepBiasSamples) {
+            recentErrors_.pop_front();
+            recentErrorLines_.pop_front();
+        }
+        const bool isNegativeBiased = negativeBias();
+        if (!wasNegativeBiased && isNegativeBiased) {
+            // Keep the line from before the first Sync in the newly negative
+            // window. Refitting against queued Syncs can move the line and
+            // make ordinary Delay_Reqs look like corroboration of a step.
+            negativeStepBaselineLine_ = recentErrorLines_.front();
+            negativeRecoveryCooldown_ = 0;
+        } else if (wasNegativeBiased && !isNegativeBiased) {
+            // A congestion burst can leave the fitted line behind briefly.
+            // Let ordinary Syncs pull it back before interpreting positive
+            // residuals as a master-time jump.
+            negativeRecoveryCooldown_ = config_.stepBiasSamples;
+        } else if (!isNegativeBiased) {
+            negativeStepBaselineLine_.reset();
+            if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
+        }
         // Queueing never makes a Sync early, so one well above the line is a
         // step candidate on its own. Queueing does make Syncs late, so a step
         // down shows only as a bias in the recent errors; while that bias
         // lasts, every Sync below the line is a candidate. Both need a settled
         // line: a young one is too rough to tell a step from its own slope
         const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
-                               (settled() && ((error > config_.positiveStepThresholdNs && delayStepEvidence(true)) ||
-                                              (error < 0 && negativeBias() && delayStepEvidence(false))));
+                               (settled() && ((error > config_.positiveStepThresholdNs &&
+                                               !isNegativeBiased && negativeRecoveryCooldown_ == 0) ||
+                                              (error < 0 && negativeBias() && negativeDelayStepEvidence())));
         if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
             // that agree with each other confirm a step
@@ -231,23 +242,23 @@ bool Servo::negativeBias() const {
     return medianOf(recentErrors_) < -config_.negativeStepBiasNs;
 }
 
-bool Servo::delayStepEvidence(bool positive) const {
+bool Servo::negativeDelayStepEvidence() const {
     // Sync queueing pushes Sync errors down, but it pushes the reciprocal
     // Delay_Req residual up. A real master-time step moves both down. Compare
     // recent fixed delay-pair residuals with the preceding history so ordinary
     // path delay and queueing do not look like a step.
-    // Sync candidates need independent confirmation. Three Delay_Req pairs
-    // also prevent one queued exchange from corroborating a positive step.
-    const size_t recentCount = positive ? config_.stepConfirmSamples : 1;
+    // The Sync candidate needs its own multi-sample confirmation. One new
+    // Delay_Req pair is enough to distinguish the directions and allows the
+    // servo to leave Locked soon after a real step, without making a brief
+    // congestion burst look like a step once its queue drains.
+    const size_t recentCount = 1;
     const size_t baselineCount = config_.stepBiasSamples;
-    const int direction = positive ? 1 : -1;
-    if (!stepEvidenceBaselineLine_ || stepEvidenceBaselineDirection_ != direction ||
-        delays_.size() < recentCount + baselineCount) return false;
+    if (!negativeStepBaselineLine_ || delays_.size() < recentCount + baselineCount) return false;
 
     std::vector<double> baseline;
     std::vector<double> recent;
     const auto residual = [this](const DelayPair& d) {
-        const auto& line = *stepEvidenceBaselineLine_;
+        const auto& line = *negativeStepBaselineLine_;
         return nanosBetween(d.masterReceive, line.masterOrigin) -
                (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
     };
@@ -258,15 +269,15 @@ bool Servo::delayStepEvidence(bool positive) const {
     for (size_t i = delays_.size() - recentCount; i < delays_.size(); ++i) {
         recent.push_back(residual(delays_[i]));
     }
-    // Compare lower envelopes, not medians. A real clock step shifts every
-    // recent exchange; queueing only raises them. The same lower-envelope
-    // check in either direction rejects both a negative-bias false positive
-    // and the apparent positive jump when a congestion burst drains.
+    // Compare lower envelopes, not medians. When a congestion burst ends,
+    // the newest Delay_Reqs return to their ordinary minimum while the
+    // immediately preceding baseline can still contain the burst's larger
+    // delays; comparing medians then mistakes the recovery for a negative
+    // clock step. A real negative master-time step lowers even the least-
+    // queued recent exchanges below the prior minimum.
     const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
     const double recentMinimum = *std::min_element(recent.begin(), recent.end());
-    const double shift = recentMinimum - baselineMinimum;
-    return positive ? shift > 0.75 * config_.negativeStepBiasNs
-                    : shift < -0.75 * config_.negativeStepBiasNs;
+    return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {
@@ -311,7 +322,7 @@ void Servo::judgeLock() {
     const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
     // A negative Sync bias alone may be ordinary receive queueing. Only let it
     // invalidate lock when a Delay_Req confirms the master's clock also moved.
-    const bool biased = negativeBias() && delayStepEvidence(false);
+    const bool biased = negativeBias() && negativeDelayStepEvidence();
     state_ = (enough && predicts && consistent && plausible && !biased) ? State::Locked : State::Acquiring;
 }
 
