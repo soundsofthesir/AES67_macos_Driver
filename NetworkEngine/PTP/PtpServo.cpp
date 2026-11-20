@@ -36,9 +36,8 @@ void Servo::startTimeline() {
     recentErrors_.clear();
     recentErrorLines_.clear();
     negativeStepBaselineLine_.reset();
-    positiveStepBaselineLine_.reset();
-    positiveStepStartHostNs_ = 0;
     negativeRecoveryCooldown_ = 0;
+    congestionRecoveryPending_ = false;
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -110,28 +109,24 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
             negativeStepBaselineLine_.reset();
             if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
         }
-        double positiveReferenceError = error;
-        bool positiveDelayConfirmed = false;
-        if (error < -0.5 * config_.negativeStepBiasNs) {
-            positiveStepBaselineLine_.reset();
-            positiveStepStartHostNs_ = 0;
-        } else if (positiveStepBaselineLine_) {
-            const auto& line = *positiveStepBaselineLine_;
-            positiveReferenceError = nanosBetween(sample.master, line.masterOrigin) -
-                (line.intercept + line.slope * nanosBetween(sample.host, line.hostOrigin));
-            const auto evidence = positiveDelayStepEvidence();
-            if (positiveReferenceError <= config_.positiveStepThresholdNs || (evidence && !*evidence)) {
-                positiveStepBaselineLine_.reset();
-                positiveStepStartHostNs_ = 0;
-                positiveReferenceError = error;
+        // Even before the servo is settled enough to call a negative bias a
+        // step, retain evidence of it as a possible receive-queue episode.
+        // Recovery from that episode can put clean Syncs above the moving fit;
+        // don't mistake those for a positive master step until the line catches
+        // back up with several on-line predictions.
+        const bool rawNegativeBias = recentErrors_.size() >= config_.stepBiasSamples &&
+                                     medianOf(recentErrors_) < -config_.negativeStepBiasNs;
+        if (rawNegativeBias && !negativeDelayStepEvidence()) {
+            congestionRecoveryPending_ = true;
+        }
+        if (congestionRecoveryPending_) {
+            if (error <= config_.positiveStepThresholdNs) {
+                if (negativeRecoveryCooldown_ == 0) negativeRecoveryCooldown_ = config_.stepBiasSamples;
+                else if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
+                if (negativeRecoveryCooldown_ == 0) congestionRecoveryPending_ = false;
             } else {
-                positiveDelayConfirmed = evidence.value_or(false);
+                negativeRecoveryCooldown_ = config_.stepBiasSamples;
             }
-        } else if (error > config_.positiveStepThresholdNs) {
-            // Freeze the line before an apparent upward jump so fitting early
-            // Syncs cannot erase a real step before its Delay_Req evidence arrives.
-            positiveStepBaselineLine_ = LineSnapshot{h0_, p0_, slope_, intercept_};
-            positiveStepStartHostNs_ = sample.host;
         }
         // Queueing never makes a Sync early, so one well above the line is a
         // step candidate on its own. Queueing does make Syncs late, so a step
@@ -139,9 +134,9 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // lasts, every Sync below the line is a candidate. Both need a settled
         // line: a young one is too rough to tell a step from its own slope
         const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
-                               (settled() && ((positiveReferenceError > config_.positiveStepThresholdNs &&
-                                               positiveDelayConfirmed && !isNegativeBiased &&
-                                               negativeRecoveryCooldown_ == 0) ||
+                               (settled() && ((error > config_.positiveStepThresholdNs &&
+                                               !isNegativeBiased && negativeRecoveryCooldown_ == 0 &&
+                                               !congestionRecoveryPending_) ||
                                               (error < 0 && negativeBias() && negativeDelayStepEvidence())));
         if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
@@ -304,29 +299,6 @@ bool Servo::negativeDelayStepEvidence() const {
     const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
     const double recentMinimum = *std::min_element(recent.begin(), recent.end());
     return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
-}
-
-std::optional<bool> Servo::positiveDelayStepEvidence() const {
-    if (!positiveStepBaselineLine_ || positiveStepStartHostNs_ == 0) return {};
-    const size_t baselineCount = config_.stepBiasSamples;
-    const size_t recentCount = config_.stepConfirmSamples;
-    std::vector<double> baseline;
-    std::vector<double> recent;
-    const auto residual = [this](const DelayPair& d) {
-        const auto& line = *positiveStepBaselineLine_;
-        return nanosBetween(d.masterReceive, line.masterOrigin) -
-               (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
-    };
-    for (const auto& delay : delays_) {
-        if (delay.hostSend < positiveStepStartHostNs_) baseline.push_back(residual(delay));
-        else recent.push_back(residual(delay));
-    }
-    if (baseline.size() < baselineCount || recent.size() < recentCount) return {};
-    baseline.erase(baseline.begin(), baseline.end() - static_cast<std::ptrdiff_t>(baselineCount));
-    recent.erase(recent.begin(), recent.end() - static_cast<std::ptrdiff_t>(recentCount));
-    const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
-    const double recentMinimum = *std::min_element(recent.begin(), recent.end());
-    return recentMinimum - baselineMinimum > 0.75 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {
