@@ -136,7 +136,7 @@ private:
     void updatePathDelay();
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
     bool negativeBias() const;  // the median of recent errors is well below the line
-    bool negativeDelayStepEvidence() const;  // Delay_Req residuals also moved down, ruling out Sync queueing
+    bool delayStepEvidence(bool positive) const;  // Delay_Req residuals corroborate either step direction
     void judgeLock();
 
     const Config config_;
@@ -145,7 +145,8 @@ private:
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
     std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
-    std::optional<LineSnapshot> negativeStepBaselineLine_;
+    std::optional<LineSnapshot> stepEvidenceBaselineLine_;
+    int stepEvidenceBaselineDirection_{0};  // -1 for a downward run, +1 for an upward run
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
 
