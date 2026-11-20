@@ -237,7 +237,15 @@ bool Servo::negativeDelayStepEvidence() const {
         if (!delays_[i].twiceDelay) return false;
         recent.push_back(*delays_[i].twiceDelay);
     }
-    return medianOf(recent) - medianOf(baseline) < -0.5 * config_.negativeStepBiasNs;
+    // Compare lower envelopes, not medians. When a congestion burst ends,
+    // the newest Delay_Reqs return to their ordinary minimum while the
+    // immediately preceding baseline can still contain the burst's larger
+    // delays; comparing medians then mistakes the recovery for a negative
+    // clock step. A real negative master-time step lowers even the least-
+    // queued recent exchanges below the prior minimum.
+    const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
+    const double recentMinimum = *std::min_element(recent.begin(), recent.end());
+    return recentMinimum - baselineMinimum < -0.5 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {
