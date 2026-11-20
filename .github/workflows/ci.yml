@@ -12,9 +12,11 @@ permissions:
 env:
   ASPL_VERSION: v3.1.2
 
+# A new push to a PR cancels its older run; runs on main always finish, so
+# every merge gets a result
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   macos:
@@ -32,6 +34,9 @@ jobs:
           # ASan + UBSan over the whole suite, arm64 only to keep it quick
           - name: sanitizers
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE=ON -DCMAKE_OSX_ARCHITECTURES=arm64
+          # Data races between the network, audio and clock threads
+          - name: thread-sanitizer
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE_THREAD=ON -DCMAKE_OSX_ARCHITECTURES=arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +67,7 @@ jobs:
           sudo cp aspl-prefix/lib/libASPL.a /usr/local/lib/
 
       - name: Configure
-        run: cmake -S . -B build ${{ matrix.cmake_args }}
+        run: cmake -S . -B build -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
@@ -78,8 +83,9 @@ jobs:
           AES67_TEST_RELAXED_TIMING: "1"
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: >
-          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,ASAN_OPTIONS,UBSAN_OPTIONS,HOME
+          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,ASAN_OPTIONS,UBSAN_OPTIONS,TSAN_OPTIONS,HOME
           "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
 
   linux-portable:

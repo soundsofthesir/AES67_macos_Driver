@@ -66,6 +66,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
         -Wall -Wextra -Wpedantic
         -Wno-unused-parameter
         -Wno-missing-field-initializers
+        # libASPL's parameter structs are built with designated initializers,
+        # which clang accepts in C++17 as an extension. Its own headers list
+        # some out of order; CMake can't mark /usr/local/include as a system
+        # directory, so those warnings would otherwise show in every file.
+        -Wno-c++20-designator
+        -Wno-reorder-init-list
     )
     # Debug flags
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
@@ -79,6 +85,17 @@ option(AES67_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitize
 if(AES67_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
+endif()
+
+# ThreadSanitizer, for the threads that share ring buffers, the jitter buffer
+# and the clock latches. It can't be combined with AddressSanitizer.
+option(AES67_SANITIZE_THREAD "Build with ThreadSanitizer" OFF)
+if(AES67_SANITIZE_THREAD)
+    if(AES67_SANITIZE)
+        message(FATAL_ERROR "AES67_SANITIZE and AES67_SANITIZE_THREAD are mutually exclusive")
+    endif()
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
 endif()
 
 # ============================================================================
