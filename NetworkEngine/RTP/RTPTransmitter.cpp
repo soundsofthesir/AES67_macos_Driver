@@ -54,8 +54,6 @@ RTPTransmitter::RTPTransmitter(
     , networkInterface_(networkInterface)
     , framesPerPacket_(framesPerPacketFor(sdp))
 {
-    std::memset(&stats_, 0, sizeof(stats_));
-
     std::random_device rd;
     ssrc_ = rd();
     nextTimestamp_ = rd();  // RFC 3550: start the RTP timeline at a random value

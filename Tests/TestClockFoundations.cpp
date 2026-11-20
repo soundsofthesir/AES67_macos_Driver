@@ -211,6 +211,15 @@ std::chrono::microseconds cpuTimeUsed(thread_act_t thread) {
 // returns, so the budget only sets how long a failure takes to show.
 void testSnapshotWithAStalledWriter() {
     std::cout << "#61: MediaClock reads never wait for a stalled writer" << std::endl;
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    // ThreadSanitizer's runtime takes its own locks around every atomic
+    // access, so a writer suspended inside one blocks the reader in the
+    // runtime, not in the latch. The other builds run this test.
+    std::cout << "  skipped under ThreadSanitizer" << std::endl;
+    return;
+#endif
+#endif
 
     MediaClock clock;
     clock.reset(1, 3, 2.0);
