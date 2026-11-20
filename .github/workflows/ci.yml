@@ -109,3 +109,34 @@ jobs:
       - name: Replay fuzz corpus
         if: matrix.cxx == 'clang++'
         run: Tests/Fuzz/run-fuzzers.sh 0 build-fuzz
+
+  servo-scenarios:
+    # The PTP servo against busy, lossy and asymmetric networks and master
+    # jumps (Tests/TestPtpServoScenarios.cpp), under ASan + UBSan. Its own
+    # job so a failure shows by name on the PR; ctest also runs it locally.
+    name: PTP servo scenarios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run
+        run: |
+          mkdir -p build-scenarios
+          clang++ -std=c++17 -g -O1 -Wall -Wextra -UNDEBUG \
+            -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer \
+            -I. Tests/TestPtpServoScenarios.cpp NetworkEngine/PTP/PtpServo.cpp \
+            -o build-scenarios/TestPtpServoScenarios
+          set -o pipefail
+          build-scenarios/TestPtpServoScenarios 2>&1 | tee build-scenarios/results.txt
+
+      # The per-scenario numbers on the run's summary page, pass or fail
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### PTP servo scenarios'
+            echo '```'
+            cat build-scenarios/results.txt 2>/dev/null || echo 'no results: the build failed'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
