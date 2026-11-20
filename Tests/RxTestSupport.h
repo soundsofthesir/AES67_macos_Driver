@@ -194,19 +194,19 @@ public:
 
     /// Sleep until the next send is due. The schedule starts at the first call,
     /// just after the first send.
+    ///
+    /// Each send is judged here, after it went out: the thread can be paused
+    /// between waking and sending, so lateness measured on waking would miss
+    /// that pause and leave a dropped packet unexcused.
     void wait() {
-        if (!started_) {
-            next_ = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (started_) {
+            record(now - next_);
+        } else {
+            next_ = now;
             started_ = true;
         }
         std::this_thread::sleep_until(next_ += period_);
-        const auto behind = std::chrono::steady_clock::now() - next_;
-        maxBehind_ = std::max(maxBehind_, behind);
-        if (behind > kLateThreshold) ++lateSends_;
-        const bool stalled = behind > stallThreshold_;
-        if (stalled) ++stalledSends_;
-        if (stalled && !inStall_) ++stalls_;
-        inStall_ = stalled;
     }
 
     /// Start counting afresh, keeping the schedule.
@@ -224,6 +224,15 @@ public:
     double maxBehindMs() const { return std::chrono::duration<double, std::milli>(maxBehind_).count(); }
 
 private:
+    void record(std::chrono::steady_clock::duration behind) {
+        maxBehind_ = std::max(maxBehind_, behind);
+        if (behind > kLateThreshold) ++lateSends_;
+        const bool stalled = behind > stallThreshold_;
+        if (stalled) ++stalledSends_;
+        if (stalled && !inStall_) ++stalls_;
+        inStall_ = stalled;
+    }
+
     static constexpr auto kLateThreshold = std::chrono::microseconds(kTestLinkOffset * 1000 / 48 / 2);
     std::chrono::nanoseconds period_;
     std::chrono::nanoseconds stallThreshold_;
