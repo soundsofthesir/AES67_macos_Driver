@@ -65,6 +65,7 @@ run TestPtpMessages     Tests/TestPtpMessages.cpp NetworkEngine/PTP/PtpMessages.
 run TestPtpBestMaster   Tests/TestPtpBestMaster.cpp NetworkEngine/PTP/PtpBestMaster.cpp NetworkEngine/PTP/PtpMessages.cpp
 run TestPtpSyncPairer   Tests/TestPtpSyncPairer.cpp
 run TestPtpServo        Tests/TestPtpServo.cpp NetworkEngine/PTP/PtpServo.cpp
+run TestPtpServoScenarios Tests/TestPtpServoScenarios.cpp NetworkEngine/PTP/PtpServo.cpp
 run TestPtpClockControl Tests/TestPtpClockControl.cpp NetworkEngine/Clock/PtpClockControl.cpp NetworkEngine/PTP/PtpServo.cpp
 run TestPtpSettings     Tests/TestPtpSettings.cpp NetworkEngine/PTP/PtpSettings.cpp
 

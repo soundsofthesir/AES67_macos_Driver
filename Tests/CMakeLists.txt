@@ -408,6 +408,17 @@ target_include_directories(TestPtpServo PRIVATE
 
 target_compile_features(TestPtpServo PRIVATE cxx_std_17)
 
+add_executable(TestPtpServoScenarios
+    TestPtpServoScenarios.cpp
+    ../NetworkEngine/PTP/PtpServo.cpp
+)
+
+target_include_directories(TestPtpServoScenarios PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestPtpServoScenarios PRIVATE cxx_std_17)
+
 add_executable(TestPtpTimeReceiver
     TestPtpTimeReceiver.cpp
     ../NetworkEngine/PTP/PtpTimeReceiver.cpp
@@ -503,6 +514,7 @@ add_test(NAME PtpMessages COMMAND TestPtpMessages)
 add_test(NAME PtpBestMaster COMMAND TestPtpBestMaster)
 add_test(NAME PtpSyncPairer COMMAND TestPtpSyncPairer)
 add_test(NAME PtpServo COMMAND TestPtpServo)
+add_test(NAME PtpServoScenarios COMMAND TestPtpServoScenarios)
 add_test(NAME PtpTimeReceiver COMMAND TestPtpTimeReceiver)
 add_test(NAME PtpClockControl COMMAND TestPtpClockControl)
 add_test(NAME PtpSettings COMMAND TestPtpSettings)
