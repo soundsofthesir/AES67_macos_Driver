@@ -321,11 +321,15 @@ void testSustainedQueueBurstsAreNotSteps() {
         network.burstMinNs = burst.minNs;
         network.jitterNs = burst.maxNs;
         Simulation sim(Master{}, network, 8.0, 3);
-        sim.runUntil(300);
+        double changedAt = 0.0;
+        for (double t = 0.125; t <= 300.0; t += 0.125) {
+            sim.runUntil(t);
+            if (changedAt == 0.0 && sim.measure().generation != 1) changedAt = t;
+        }
         CHECK(sim.measure().generation == 1,
               "queueing " << burst.minNs / 1e6 << "-" << burst.maxNs / 1e6 << " ms for "
                           << burst.durationSeconds << " s does not change generation ("
-                          << sim.measure().generation << ")");
+                          << sim.measure().generation << ", first change at " << changedAt << " s)");
     }
 }
 
