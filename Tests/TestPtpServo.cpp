@@ -309,16 +309,24 @@ void testIsolatedPositiveExcursionIsNotAStep() {
 // #211: sustained receive queueing creates a negative Sync bias, but cannot
 // move the reciprocal Delay_Req measurements down like a master-time step.
 void testSustainedQueueBurstsAreNotSteps() {
-    std::cout << "Sustained 1-3 ms queue bursts do not start a new timeline" << std::endl;
-    Network bursty;
-    bursty.burstEverySeconds = 20.0;
-    bursty.burstSeconds = 3.0;
-    bursty.burstMinNs = 1000000.0;
-    bursty.jitterNs = 3000000.0;
-    Simulation sim(Master{}, bursty, 8.0, 19);
-    sim.runUntil(300);
-    CHECK(sim.measure().generation == 1,
-          "sustained 1-3 ms queue bursts do not change generation (" << sim.measure().generation << ")");
+    std::cout << "Sustained millisecond queue bursts do not start a new timeline" << std::endl;
+    struct Burst { double minNs; double maxNs; double durationSeconds; };
+    for (const Burst burst : {Burst{1200000.0, 2000000.0, 2.0},
+                              Burst{1500000.0, 3000000.0, 2.0},
+                              Burst{1500000.0, 3000000.0, 5.0},
+                              Burst{1000000.0, 3000000.0, 3.0}}) {
+        Network network;
+        network.burstEverySeconds = 20.0;
+        network.burstSeconds = burst.durationSeconds;
+        network.burstMinNs = burst.minNs;
+        network.jitterNs = burst.maxNs;
+        Simulation sim(Master{}, network, 8.0, 3);
+        sim.runUntil(300);
+        CHECK(sim.measure().generation == 1,
+              "queueing " << burst.minNs / 1e6 << "-" << burst.maxNs / 1e6 << " ms for "
+                          << burst.durationSeconds << " s does not change generation ("
+                          << sim.measure().generation << ")");
+    }
 }
 
 void testHoldover() {
