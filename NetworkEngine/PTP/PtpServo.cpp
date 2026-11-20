@@ -36,7 +36,9 @@ void Servo::startTimeline() {
     recentErrors_.clear();
     recentErrorLines_.clear();
     negativeStepBaselineLine_.reset();
-    negativeRecoveryCooldown_ = 0;
+    positiveStepCandidates_.clear();
+    positiveStepBaselineLine_.reset();
+    positiveStepStartHostNs_ = 0;
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -98,15 +100,12 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
             // window. Refitting against queued Syncs can move the line and
             // make ordinary Delay_Reqs look like corroboration of a step.
             negativeStepBaselineLine_ = recentErrorLines_.front();
-            negativeRecoveryCooldown_ = 0;
         } else if (wasNegativeBiased && !isNegativeBiased) {
             // A congestion burst can leave the fitted line behind briefly.
             // Let ordinary Syncs pull it back before interpreting positive
             // residuals as a master-time jump.
-            negativeRecoveryCooldown_ = config_.stepBiasSamples;
         } else if (!isNegativeBiased) {
             negativeStepBaselineLine_.reset();
-            if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
         }
         // Queueing never makes a Sync early, so one well above the line is a
         // step candidate on its own. Queueing does make Syncs late, so a step
@@ -114,9 +113,7 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // lasts, every Sync below the line is a candidate. Both need a settled
         // line: a young one is too rough to tell a step from its own slope
         const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
-                               (settled() && ((error > config_.positiveStepThresholdNs &&
-                                               !isNegativeBiased && negativeRecoveryCooldown_ == 0) ||
-                                              (error < 0 && negativeBias() && negativeDelayStepEvidence())));
+                               (settled() && error < 0 && isNegativeBiased && negativeDelayStepEvidence());
         if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
             // that agree with each other confirm a step
@@ -137,6 +134,46 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
                 // time limit, not here
                 judgeLock();
             }
+            return;
+        }
+
+        // A modest positive Sync residual might be either a real master step
+        // or the fitted line catching up after receive congestion. Hold those
+        // Syncs out of the fit until later Delay_Reqs corroborate a real step.
+        if (!positiveStepCandidates_.empty()) {
+            const auto& line = *positiveStepBaselineLine_;
+            const double candidateError = nanosBetween(sample.master, line.masterOrigin) -
+                (line.intercept + line.slope * nanosBetween(sample.host, line.hostOrigin));
+            if (candidateError > config_.positiveStepThresholdNs) {
+                positiveStepCandidates_.push_back(sample);
+                const auto evidence = positiveDelayStepEvidence();
+                if (evidence && *evidence) {
+                    const std::vector<Sample> confirmed = positiveStepCandidates_;
+                    reset();
+                    for (const auto& s : confirmed) addSample(s);
+                } else if (evidence) {
+                    const std::vector<Sample> accepted = positiveStepCandidates_;
+                    positiveStepCandidates_.clear();
+                    positiveStepBaselineLine_.reset();
+                    positiveStepStartHostNs_ = 0;
+                    for (const auto& s : accepted) addSample(s);
+                } else if (state_ == State::Locked) {
+                    state_ = State::Acquiring;
+                }
+                return;
+            }
+            // The next Sync returned to the line: discard an isolated
+            // excursion and resume fitting with this on-line sample.
+            positiveStepCandidates_.clear();
+            positiveStepBaselineLine_.reset();
+            positiveStepStartHostNs_ = 0;
+        }
+        if (settled() && error > config_.positiveStepThresholdNs) {
+            stepCandidates_.clear();
+            positiveStepBaselineLine_ = LineSnapshot{h0_, p0_, slope_, intercept_};
+            positiveStepStartHostNs_ = sample.host;
+            positiveStepCandidates_.push_back(sample);
+            if (state_ == State::Locked) state_ = State::Acquiring;
             return;
         }
         stepCandidates_.clear();
@@ -278,6 +315,29 @@ bool Servo::negativeDelayStepEvidence() const {
     const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
     const double recentMinimum = *std::min_element(recent.begin(), recent.end());
     return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
+}
+
+std::optional<bool> Servo::positiveDelayStepEvidence() const {
+    if (!positiveStepBaselineLine_ || positiveStepStartHostNs_ == 0) return {};
+    const size_t baselineCount = config_.stepBiasSamples;
+    const size_t recentCount = config_.stepConfirmSamples;
+    std::vector<double> baseline;
+    std::vector<double> recent;
+    const auto residual = [this](const DelayPair& d) {
+        const auto& line = *positiveStepBaselineLine_;
+        return nanosBetween(d.masterReceive, line.masterOrigin) -
+               (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
+    };
+    for (const auto& delay : delays_) {
+        if (delay.hostSend < positiveStepStartHostNs_) baseline.push_back(residual(delay));
+        else recent.push_back(residual(delay));
+    }
+    if (baseline.size() < baselineCount || recent.size() < recentCount) return {};
+    baseline.erase(baseline.begin(), baseline.end() - static_cast<std::ptrdiff_t>(baselineCount));
+    recent.erase(recent.begin(), recent.end() - static_cast<std::ptrdiff_t>(recentCount));
+    const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
+    const double recentMinimum = *std::min_element(recent.begin(), recent.end());
+    return recentMinimum - baselineMinimum > 0.75 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {
