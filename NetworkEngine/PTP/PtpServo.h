@@ -145,7 +145,6 @@ private:
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
     std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
-    std::deque<LineSnapshot> recentErrorLines_;  // fitted line before each corresponding Sync
     std::optional<LineSnapshot> negativeStepBaselineLine_;
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
