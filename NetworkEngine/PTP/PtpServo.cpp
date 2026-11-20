@@ -222,7 +222,11 @@ bool Servo::negativeDelayStepEvidence() const {
     // Delay_Req residual up. A real master-time step moves both down. Compare
     // recent fixed delay-pair residuals with the preceding history so ordinary
     // path delay and queueing do not look like a step.
-    const size_t recentCount = config_.stepConfirmSamples;
+    // The Sync candidate needs its own multi-sample confirmation. One new
+    // Delay_Req pair is enough to distinguish the directions and allows the
+    // servo to leave Locked soon after a real step, without making a brief
+    // congestion burst look like a step once its queue drains.
+    const size_t recentCount = 1;
     const size_t baselineCount = config_.stepBiasSamples;
     if (delays_.size() < recentCount + baselineCount) return false;
 
@@ -245,7 +249,7 @@ bool Servo::negativeDelayStepEvidence() const {
     // queued recent exchanges below the prior minimum.
     const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
     const double recentMinimum = *std::min_element(recent.begin(), recent.end());
-    return recentMinimum - baselineMinimum < -0.5 * config_.negativeStepBiasNs;
+    return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {
@@ -288,8 +292,9 @@ void Servo::judgeLock() {
         predicts = static_cast<double>(good) >= fraction * static_cast<double>(history);
     }
     const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
-    // Recent Syncs biased off the line: the line is wrong, whatever the older predictions say
-    const bool biased = negativeBias();
+    // A negative Sync bias alone may be ordinary receive queueing. Only let it
+    // invalidate lock when a Delay_Req confirms the master's clock also moved.
+    const bool biased = negativeBias() && negativeDelayStepEvidence();
     state_ = (enough && predicts && consistent && plausible && !biased) ? State::Locked : State::Acquiring;
 }
 
