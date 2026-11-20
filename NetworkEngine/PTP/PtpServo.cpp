@@ -34,7 +34,6 @@ void Servo::startTimeline() {
     delays_.clear();
     predictionErrors_.clear();
     recentErrors_.clear();
-    recentErrorLines_.clear();
     negativeStepBaselineLine_.reset();
     rejected_.clear();
     stepCandidates_.clear();
@@ -84,22 +83,17 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // How far this Sync is from where the line says it should be: zero
         // for an unqueued packet, negative by its queueing otherwise
         const double error = nanosBetween(sample.master, p0_) - envelopeOffsetAt(sample.host);
-        const bool wasNegativeBiased = negativeBias();
-        recentErrors_.push_back(error);
-        recentErrorLines_.push_back(LineSnapshot{h0_, p0_, slope_, intercept_});
-        if (recentErrors_.size() > config_.stepBiasSamples) {
-            recentErrors_.pop_front();
-            recentErrorLines_.pop_front();
-        }
-        const bool isNegativeBiased = negativeBias();
-        if (!wasNegativeBiased && isNegativeBiased) {
-            // Keep the line from before the first Sync in the newly negative
-            // window. Refitting against queued Syncs can move the line and
-            // make ordinary Delay_Reqs look like corroboration of a step.
-            negativeStepBaselineLine_ = recentErrorLines_.front();
-        } else if (!isNegativeBiased) {
+        // Capture the fitted line before a run of materially delayed Syncs
+        // can tilt it. The threshold is below the bias threshold so this is
+        // available when the full median window becomes negative.
+        const double negativeRunThreshold = 0.5 * config_.negativeStepBiasNs;
+        if (error < -negativeRunThreshold && !negativeStepBaselineLine_) {
+            negativeStepBaselineLine_ = LineSnapshot{h0_, p0_, slope_, intercept_};
+        } else if (error >= -negativeRunThreshold) {
             negativeStepBaselineLine_.reset();
         }
+        recentErrors_.push_back(error);
+        if (recentErrors_.size() > config_.stepBiasSamples) recentErrors_.pop_front();
         // Queueing never makes a Sync early, so one well above the line is a
         // step candidate on its own. Queueing does make Syncs late, so a step
         // down shows only as a bias in the recent errors; while that bias
