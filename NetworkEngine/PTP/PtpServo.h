@@ -137,7 +137,7 @@ private:
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
     bool negativeBias() const;  // the median of recent errors is well below the line
     bool negativeDelayStepEvidence() const;  // Delay_Req residuals also moved down, ruling out Sync queueing
-    std::optional<bool> positiveDelayStepEvidence() const;  // post-candidate Delay_Reqs moved up with the master
+    std::optional<bool> positiveDelayStepEvidence() const;  // later Delay_Reqs moved up with the master
     void judgeLock();
 
     const Config config_;
@@ -148,9 +148,9 @@ private:
     std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
     std::deque<LineSnapshot> recentErrorLines_;  // fitted line before each corresponding Sync
     std::optional<LineSnapshot> negativeStepBaselineLine_;
-    std::vector<Sample> positiveStepCandidates_;
     std::optional<LineSnapshot> positiveStepBaselineLine_;
     uint64_t positiveStepStartHostNs_{0};
+    size_t negativeRecoveryCooldown_{0};
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
 
