@@ -69,6 +69,14 @@ run TestPtpServoScenarios Tests/TestPtpServoScenarios.cpp NetworkEngine/PTP/PtpS
 run TestPtpClockControl Tests/TestPtpClockControl.cpp NetworkEngine/Clock/PtpClockControl.cpp NetworkEngine/PTP/PtpServo.cpp
 run TestPtpSettings     Tests/TestPtpSettings.cpp NetworkEngine/PTP/PtpSettings.cpp
 
+# Shell tests that stand in for every system command they would change
+echo "::group::Installer configure-driver"
+if ! bash "$ROOT/Tests/Installer/test-configure-driver.sh"; then
+    echo "TEST FAILED: Installer configure-driver"
+    failed+=("Installer configure-driver")
+fi
+echo "::endgroup::"
+
 if ((${#failed[@]})); then
     echo "Failed: ${failed[*]}"
     exit 1
