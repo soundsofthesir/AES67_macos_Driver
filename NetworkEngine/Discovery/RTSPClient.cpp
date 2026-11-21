@@ -16,6 +16,10 @@
 #include <cstring>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
+#include <cctype>
+#include <iterator>
+#include <utility>
 
 namespace AES67 {
 
@@ -226,7 +230,11 @@ std::optional<RTSPResponse> RTSPClient::parseResponse(const std::string& respons
 
     std::istringstream statusLine(line);
     std::string protocol;
-    statusLine >> protocol >> response.statusCode;
+    if (!(statusLine >> protocol >> response.statusCode) ||
+        protocol.rfind("RTSP/", 0) != 0 ||
+        response.statusCode < 100 || response.statusCode > 999) {
+        return std::nullopt;
+    }
     std::getline(statusLine, response.statusMessage);
 
     // Trim leading space from message
@@ -257,14 +265,29 @@ std::optional<RTSPResponse> RTSPClient::parseResponse(const std::string& respons
         }
     }
 
-    // Read body if Content-Length is present
+    // Read body if Content-Length is present. The value comes from the other
+    // end of the connection: a malformed or absurd length must fail the
+    // response, not throw out of the caller or allocate what it asks for.
     auto contentLengthIt = response.headers.find("Content-Length");
     if (contentLengthIt != response.headers.end()) {
-        size_t contentLength = std::stoul(contentLengthIt->second);
-        if (contentLength > 0) {
-            response.body.resize(contentLength);
-            stream.read(&response.body[0], contentLength);
+        const std::string& lengthText = contentLengthIt->second;
+        const bool isNumber = !lengthText.empty() && lengthText.size() <= 9 &&
+            std::all_of(lengthText.begin(), lengthText.end(),
+                        [](unsigned char c) { return std::isdigit(c) != 0; });
+        constexpr size_t kMaxBodyBytes = 1u << 20;  // SDP descriptions are kilobytes
+        if (!isNumber) {
+            return std::nullopt;
         }
+        const size_t contentLength = static_cast<size_t>(std::stoul(lengthText));
+        if (contentLength > kMaxBodyBytes) {
+            return std::nullopt;
+        }
+        std::string body((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        if (body.size() < contentLength) {
+            return std::nullopt;  // truncated: fewer bytes than the header promised
+        }
+        body.resize(contentLength);
+        response.body = std::move(body);
     } else {
         // Read remaining as body
         std::string remaining((std::istreambuf_iterator<char>(stream)),
@@ -302,8 +325,15 @@ bool RTSPClient::parseURL(const std::string& url, std::string& host, uint16_t& p
     // Parse host:port
     size_t colon = hostPort.find(':');
     if (colon != std::string::npos) {
+        const std::string portText = hostPort.substr(colon + 1);
+        const bool isNumber = !portText.empty() && portText.size() <= 5 &&
+            std::all_of(portText.begin(), portText.end(),
+                        [](unsigned char c) { return std::isdigit(c) != 0; });
+        if (!isNumber) {
+            return false;
+        }
         host = hostPort.substr(0, colon);
-        port = static_cast<uint16_t>(std::stoi(hostPort.substr(colon + 1)));
+        port = static_cast<uint16_t>(std::stoi(portText));
     } else {
         host = hostPort;
         port = 554;  // Default RTSP port

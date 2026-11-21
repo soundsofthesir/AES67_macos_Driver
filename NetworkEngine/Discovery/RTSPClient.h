@@ -83,6 +83,11 @@ public:
     // Check if connected
     bool isConnected() const { return socket_ >= 0; }
 
+    // Parse an RTSP response from the server (RFC 2326 section 7.1). Static and
+    // public so tests and the fuzzer can feed it bytes without a socket; a
+    // malformed response is rejected rather than throwing.
+    static std::optional<RTSPResponse> parseResponse(const std::string& response);
+
 private:
     // Send RTSP request
     std::optional<RTSPResponse> sendRequest(
@@ -91,9 +96,6 @@ private:
         const std::map<std::string, std::string>& headers = {},
         const std::string& body = ""
     );
-
-    // Parse RTSP response
-    std::optional<RTSPResponse> parseResponse(const std::string& response);
 
     // Parse URL
     bool parseURL(const std::string& url, std::string& host, uint16_t& port, std::string& path);

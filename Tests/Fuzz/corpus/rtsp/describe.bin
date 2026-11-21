@@ -1,0 +1,10 @@
+RTSP/1.0 200 OK
+CSeq: 1
+Content-Type: application/sdp
+Content-Length: 71
+
+v=0
+o=- 0 0 IN IP4 192.0.2.1
+s=Test
+t=0 0
+m=audio 5004 RTP/AVP 96
