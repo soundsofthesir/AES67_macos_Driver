@@ -4,6 +4,15 @@
 
 cmake_minimum_required(VERSION 3.20)
 
+# Set before project(): CMake reads these when it initialises the compiler and
+# linker flags. Set after project() they are silently ignored, which leaves the
+# build host's deployment target in the bundle (a driver built on macOS 26 then
+# refuses to load on macOS 13) and makes the "universal" default below inert.
+if(APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build architectures")
+endif()
+
 # Read version from VERSION.txt
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" VERSION_STRING)
 string(STRIP "${VERSION_STRING}" VERSION_STRING)
@@ -47,11 +56,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# macOS specific settings
+# macOS specific settings (deployment target and architectures are set above,
+# before project(), where CMake reads them)
 if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
-    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build architectures")
-
     # Enable Hardened Runtime for notarization
     set(CMAKE_XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME YES)
 
