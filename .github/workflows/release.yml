@@ -53,8 +53,10 @@ jobs:
           set -euo pipefail
           short="$(sed -E 's/-build\..*$//' VERSION.txt | tr -d '[:space:]')"
           build="$(cat VERSION.txt | tr -d '[:space:]')"
+          # The project tags prereleases like v0.1.0-alpha.1, so a suffix after
+          # the VERSION.txt version is allowed; a different version is not.
           case "$TAG" in
-            "v$short"|"v$build") echo "releasing $TAG (VERSION.txt: $build)" ;;
+            "v$short"|"v$short"-*) echo "releasing $TAG (VERSION.txt: $build)" ;;
             *) echo "tag $TAG does not match VERSION.txt ($build)" >&2; exit 1 ;;
           esac
 
