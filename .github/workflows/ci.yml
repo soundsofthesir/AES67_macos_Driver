@@ -234,7 +234,7 @@ jobs:
           persist-credentials: false
 
       - name: Install linters
-        run: brew install shellcheck actionlint
+        run: brew install shellcheck actionlint swiftlint
 
       - name: shellcheck
         run: git ls-files -z '*.sh' 'Installer/scripts/*' | xargs -0 shellcheck --severity=warning

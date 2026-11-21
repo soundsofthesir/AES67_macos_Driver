@@ -20,6 +20,9 @@ SHIM="$ROOT/Tests/Linux/shim"
 OUT="${1:-$ROOT/build-linux}"
 CXX="${CXX:-g++}"
 mkdir -p "$OUT"
+# Absolute from here on: the tests run with $OUT as their working directory,
+# and LLVM_PROFILE_FILE below must not be resolved a second time
+OUT="$(cd "$OUT" && pwd)"
 
 # F_FULLFSYNC is macOS-only; -1 makes that fcntl() fail, so StreamConfig
 # falls back to fsync() as it would on a filesystem without full sync.
