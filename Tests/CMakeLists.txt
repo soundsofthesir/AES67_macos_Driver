@@ -546,9 +546,9 @@ if(TARGET AES67Driver)
 endif()
 
 # Tests that open sockets, join multicast groups or share ports (#132). The
-# resource lock serialises them when ctest runs with -j, so the rest of the
-# suite can run in parallel without losing the "one test at a time on the
-# network" property.
+# resource lock serialises them when ctest runs with -j, and PROCESSORS 4
+# keeps the rest of the suite off the machine while one runs: their pacing and
+# PTP limits are measured in wall-clock time. Everything else runs in parallel.
 set(AES67_NETWORK_TESTS
     CriticalPathRegressions
     ClockRecovery
@@ -564,6 +564,7 @@ set(AES67_NETWORK_TESTS
 set_tests_properties(${AES67_NETWORK_TESTS} PROPERTIES
     RESOURCE_LOCK multicast
     LABELS network
+    PROCESSORS 4
 )
 
 message(STATUS "Tests configured:")
