@@ -1,5 +1,7 @@
 # AES67 macOS Audio Driver
 
+[![CI](https://github.com/soundsofthesir/AES67_macos_Driver/actions/workflows/ci.yml/badge.svg)](https://github.com/soundsofthesir/AES67_macos_Driver/actions/workflows/ci.yml)
+
 > **Experimental.** Not ready for production use.
 
 An open-source AES67 network audio driver for macOS. It runs as a user-space Core Audio plug-in (AudioServerPlugIn, built on libASPL), so no kernel extension or security changes are needed.
@@ -194,10 +196,11 @@ With PTP on, the driver log says `PTP: locked to grandmaster` once it locks. If 
 
 ## Testing tools
 
-- CI (`.github/workflows/ci.yml`) builds and runs `ctest` on macOS in Release and with AddressSanitizer + UndefinedBehaviorSanitizer (`-DAES67_SANITIZE=ON`), and runs the tests that need no Apple frameworks on Linux with both sanitizers (`Tests/Linux/run-portable-tests.sh`).
+- CI (`.github/workflows/ci.yml`) builds and runs `ctest` on macOS in Release (universal), with AddressSanitizer + UndefinedBehaviorSanitizer (`-DAES67_SANITIZE=ON`) and with ThreadSanitizer (`-DAES67_SANITIZE_THREAD=ON`). On Linux it runs the tests that need no Apple frameworks with both sanitizers (`Tests/Linux/run-portable-tests.sh`) under both g++ and clang++.
+- CI also checks that the driver bundle is universal with a macOS 13 minimum and that its version matches `VERSION.txt`, installs it into a temporary `DESTDIR` to check the layout, builds the unsigned `.pkg` and inspects its payload, and measures coverage of the portable suite. A lint job runs shellcheck, actionlint, whitespace checks, SwiftLint and `clang-tidy` on changed lines; CodeQL and OpenSSF Scorecard run separately.
 - CI sets `AES67_TEST_RELAXED_TIMING=1`, which widens the tests' limits on timing accuracy (PTP phase, packet departure times, and how many packets a sender gets out in a set time) for shared runners. Ordering and continuity checks don't change. Receive tests excuse only packets their own sender sent late, or that the driver counted as written after playout.
-- `Tests/Fuzz/run-fuzzers.sh` fuzzes the parsers that read network packets and config files (PTP, SAP, SDP, `streams.json`, `ptp.json`) with libFuzzer on Linux. CI replays `Tests/Fuzz/corpus` on every PR, and fuzzes each parser for 5 minutes nightly (`.github/workflows/fuzz.yml`).
-- `ctest` runs 29 test suites and a check of the driver bundle's signature. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
+- `Tests/Fuzz/run-fuzzers.sh` fuzzes the parsers that read network packets and config files (PTP, SAP, SDP, RTSP, `streams.json`, `ptp.json`) with libFuzzer on Linux. CI replays `Tests/Fuzz/corpus` on every PR, and fuzzes each parser for 5 minutes on every core nightly (`.github/workflows/fuzz.yml`). The nightly run keeps the corpus it grows and opens an issue when it finds a crash.
+- `ctest` runs 32 test suites and a check of the driver bundle's signature. Network tests take a resource lock, so `ctest -j` runs the rest of the suite in parallel. Tests that send audio, SAP or PTP packets stay on your machine and never reach the network. Multicast tests fail if the 224.0.0.0/4 route goes through a VPN interface (check `netstat -rn -f inet | grep 224`), or if the terminal app running them lacks Local Network permission (System Settings > Privacy & Security > Local Network).
 - `AES67TestSender` sends a test tone **onto your network** (default 239.1.1.1:5004).
 - `AES67ClockProbeClient` measures the device's clock and checks the audio is continuous. Build it with `-DBUILD_SPIKES=ON`.
 - Driver logs go to the unified log: `sudo log show --info --predicate 'subsystem == "com.aes67driver"'`, or `log stream` with the same predicate to watch live.

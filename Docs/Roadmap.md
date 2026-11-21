@@ -16,7 +16,7 @@ The driver shows up in Core Audio as one device with 128 inputs and 128 outputs.
 | Manager app | Planned | Builds and runs on Apple Silicon and Intel, but doesn't control the driver yet ([#27](https://github.com/soundsofthesir/AES67_macos_Driver/issues/27), [#38](https://github.com/soundsofthesir/AES67_macos_Driver/issues/38)). Streams are set with `aes67ctl` or in `streams.json`. |
 | Install | Pre-release | A signed and notarized `.pkg` on the [releases page](https://github.com/soundsofthesir/AES67_macos_Driver/releases), first published as 0.1.0 alpha 1 on 19 November 2026. It installs the driver, `aes67ctl` and the keepalive service. |
 
-CI builds and tests every change on macOS (Release, and with AddressSanitizer and UndefinedBehaviorSanitizer) and on Linux.
+CI builds and tests every change on macOS (universal Release, AddressSanitizer + UndefinedBehaviorSanitizer, and ThreadSanitizer) and on Linux. A nightly run repeats the timing-sensitive tests on the newest macOS runner and executes the Intel slice through Rosetta.
 
 ## Steps
 

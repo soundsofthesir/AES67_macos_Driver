@@ -38,41 +38,44 @@ jobs:
           - name: thread-sanitizer
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DAES67_SANITIZE_THREAD=ON -DCMAKE_OSX_ARCHITECTURES=arm64
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # libASPL isn't in Homebrew. Build the pinned release universal, so the
-      # universal driver build can link it, and install into /usr/local, where
-      # CMakeLists.txt looks for it.
+      # libASPL isn't in Homebrew. Build the pinned release universal and for
+      # the same deployment target as the driver, so the linker does not warn
+      # that its objects were built for the runner's newer macOS.
       - name: Cache libASPL
         id: aspl-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: aspl-prefix
-          key: libaspl-${{ env.ASPL_VERSION }}-universal-macos-15
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
 
       - name: Build libASPL
         if: steps.aspl-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
           cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
             -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
           cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
           cmake --install aspl-build
 
-      - name: Install libASPL
-        run: |
-          sudo mkdir -p /usr/local/include /usr/local/lib
-          sudo cp -R aspl-prefix/include/aspl /usr/local/include/
-          sudo cp aspl-prefix/lib/libASPL.a /usr/local/lib/
-
+      # CMAKE_PREFIX_PATH rather than a sudo install into /usr/local: the
+      # prefix is all find_path/find_library need, and nothing is left behind
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${{ matrix.cmake_args }}
+        run: >
+          cmake -S . -B build
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix"
+          ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
 
-      # Serial: several tests share multicast groups and ports (#132).
+      # Network tests share multicast groups and ports, so Tests/CMakeLists.txt
+      # gives them a resource lock and -j runs the rest in parallel.
       # Runners are shared VMs: tests widen their limits on timing accuracy
       # (PTP phase, packets outside the playout window), never correctness.
       # As root: since macOS 15, Local Network privacy blocks multicast for a
@@ -87,6 +90,54 @@ jobs:
         run: >
           sudo --preserve-env=AES67_TEST_RELAXED_TIMING,ASAN_OPTIONS,UBSAN_OPTIONS,TSAN_OPTIONS,HOME
           "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
+          --parallel 4 --output-junit "$PWD/build/test-results.xml"
+
+      - name: Test summary
+        if: always()
+        run: python3 .github/scripts/test-summary.py --title "macOS (${{ matrix.name }})" build/test-results.xml
+
+      # The report and the log a failing test wrote, kept even when the step
+      # that starts ctest is the one that failed
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results-macos-${{ matrix.name }}
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # The README and the installer promise a universal driver for macOS 13;
+      # nothing else in the build checks that the bundle says so
+      - name: Check bundle metadata
+        if: matrix.name == 'release'
+        run: .github/scripts/check-bundle.sh build .
+
+      # cmake --install is otherwise only exercised on a user's Mac
+      - name: Check install layout
+        if: matrix.name == 'release'
+        run: .github/scripts/check-install.sh build
+
+      # The .pkg is only built by the release workflow today. Build it here
+      # unsigned, so a packaging regression fails on the PR that causes it.
+      - name: Package (unsigned)
+        if: matrix.name == 'release'
+        run: Installer/build-installer.sh
+
+      - name: Check package payload
+        if: matrix.name == 'release'
+        run: .github/scripts/check-package.sh
+
+      - name: Upload unsigned package
+        if: matrix.name == 'release'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-unsigned
+          path: Installer/output/*.pkg
+          if-no-files-found: error
+          retention-days: 7
 
   linux-portable:
     # The tests that don't need Core Audio or macOS socket options, under
@@ -99,7 +150,9 @@ jobs:
       matrix:
         cxx: [g++, clang++]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Shared/Types.h includes <uuid/uuid.h> for uuid_t; macOS has it in the SDK
       - name: Install libuuid headers
@@ -116,6 +169,153 @@ jobs:
         if: matrix.cxx == 'clang++'
         run: Tests/Fuzz/run-fuzzers.sh 0 build-fuzz
 
+  coverage:
+    # The portable suite again, instrumented: which parser and config code the
+    # tests actually reach. The full macOS suite is too expensive to instrument
+    # on every PR; this is the half that changes most.
+    name: Portable coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libuuid and LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y uuid-dev clang llvm
+
+      - name: Build, run and instrument
+        env:
+          CXX: clang++
+          COVERAGE: "1"
+        run: Tests/Linux/run-portable-tests.sh build-coverage
+
+      - name: Report
+        run: |
+          set -euo pipefail
+          PROFDATA="$(command -v llvm-profdata || command -v llvm-profdata-18)"
+          LLVMCOV="$(command -v llvm-cov || command -v llvm-cov-18)"
+          "$PROFDATA" merge -sparse build-coverage/*.profraw -o build-coverage/coverage.profdata
+          mapfile -t binaries < <(find build-coverage -maxdepth 1 -type f -perm -111 ! -name '*.profraw' | sort)
+          echo "Instrumented ${#binaries[@]} test binaries"
+          "$LLVMCOV" export -format=lcov -instr-profile=build-coverage/coverage.profdata \
+            "${binaries[@]}" > coverage.lcov
+          "$LLVMCOV" report -instr-profile=build-coverage/coverage.profdata \
+            "${binaries[@]}" | tee coverage-report.txt
+          {
+            echo '### Portable coverage'
+            echo '```'
+            tail -n 1 coverage-report.txt
+            echo '```'
+            echo "Open the run's artifacts for the full per-file report (coverage.lcov)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: portable-coverage
+          path: |
+            coverage.lcov
+            coverage-report.txt
+          retention-days: 14
+
+  lint:
+    # Cheap checks that catch mistakes the compiler does not: shell scripts run
+    # as root by the installer, workflow syntax, stray whitespace, and Swift
+    # lint annotations on the Manager app.
+    name: Lint
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install linters
+        run: brew install shellcheck actionlint
+
+      - name: shellcheck
+        run: git ls-files -z '*.sh' 'Installer/scripts/*' | xargs -0 shellcheck --severity=warning
+
+      - name: actionlint
+        run: actionlint
+
+      - name: Whitespace
+        run: |
+          status=0
+          if git ls-files '*.cpp' '*.h' '*.hpp' '*.swift' '*.sh' '*.yml' '*.yaml' '*.md' \
+              | xargs grep -lIP '[ \t]+$'; then
+            echo "Trailing whitespace on the lines above"
+            status=1
+          fi
+          if git ls-files '*.cpp' '*.h' '*.hpp' '*.swift' | xargs grep -lIP '^\t'; then
+            echo "Tab-indented lines above (the tree uses spaces)"
+            status=1
+          fi
+          exit "$status"
+
+      # Advisory: the tree predates a formatter, so these annotate the PR
+      # rather than fail it. Shell and whitespace checks above are blocking.
+      - name: SwiftLint (advisory)
+        run: swiftlint lint --quiet --reporter github-actions-logging ManagerApp
+
+  static-analysis:
+    # clang-analyzer and bugprone checks on the lines a PR changes. Advisory
+    # until a baseline run on the runner confirms the LLVM in the image parses
+    # the SDK; see the comment on the step.
+    name: clang-tidy (changed lines)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Configure (compile database only)
+        run: >
+          cmake -S . -B build-tidy -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix"
+
+      - name: Fetch the base branch
+        if: github.event_name == 'pull_request'
+        run: >
+          git fetch --no-tags origin
+          "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      # continue-on-error: the interesting failure mode is a finding on a
+      # changed line, which still lands in the step summary and the annotations
+      - name: clang-tidy changed lines (advisory)
+        continue-on-error: true
+        run: |
+          CLANG_TIDY="$(brew --prefix llvm@18)/bin/clang-tidy"
+          [ -x "$CLANG_TIDY" ] || CLANG_TIDY="$(command -v clang-tidy)"
+          .github/scripts/clang-tidy-changed.py \
+            --binary "$CLANG_TIDY" \
+            --build-dir build-tidy \
+            --base "${{ github.base_ref && format('origin/{0}', github.base_ref) || 'HEAD~1' }}"
+
   servo-scenarios:
     # The PTP servo against busy, lossy and asymmetric networks and master
     # jumps (Tests/TestPtpServoScenarios.cpp), under ASan + UBSan. Its own
@@ -124,7 +324,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build and run
         run: |

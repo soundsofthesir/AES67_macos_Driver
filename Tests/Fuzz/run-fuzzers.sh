@@ -10,8 +10,8 @@
 # build dir, crashes to <build-dir>/crashes. When a crash is fixed, add its
 # input to Tests/Fuzz/corpus/<target>/.
 #
-# Needs clang with the libFuzzer runtime (Xcode's clang on macOS, the clang
-# package on Linux) and, on Linux, the libuuid headers.
+# Needs clang with the libFuzzer runtime (the clang package on Linux; Xcode's
+# clang or Homebrew LLVM on macOS) and, on Linux, the libuuid headers.
 
 set -euo pipefail
 

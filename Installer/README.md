@@ -40,6 +40,31 @@ REQUIRE_SIGNING=1 NOTARY_PROFILE=aes67-notary Installer/build-installer.sh --bui
 
 `REQUIRE_SIGNING=1` stops the build if either certificate or the profile is missing. Set `DEVELOPER_ID_APP` or `DEVELOPER_ID_INSTALLER` to choose a certificate when the keychain has more than one.
 
+## Releasing from CI
+
+Pushing a tag that matches `VERSION.txt` runs `.github/workflows/release.yml`. Either `v0.1.0` or `v0.1.0-build.19` is accepted for `VERSION.txt` containing `0.1.0-build.19`. The workflow builds the universal driver, signs and notarizes it with the same script as above, verifies the signature with `pkgutil` and `spctl`, and attaches the `.pkg` and its SHA-256 to a GitHub Release.
+
+It needs these repository secrets:
+
+| Secret | Value |
+|---|---|
+| `DEVELOPER_ID_APP_P12` | base64 of the Developer ID Application `.p12` |
+| `DEVELOPER_ID_APP_PASSWORD` | password for that `.p12` |
+| `DEVELOPER_ID_INSTALLER_P12` | base64 of the Developer ID Installer `.p12` |
+| `DEVELOPER_ID_INSTALLER_PASSWORD` | password for that `.p12` |
+| `KEYCHAIN_PASSWORD` | any password; used for the temporary keychain |
+| `NOTARY_APPLE_ID` | Apple ID for notarization |
+| `NOTARY_TEAM_ID` | team ID |
+| `NOTARY_PASSWORD` | app-specific password for notarization |
+
+Export a certificate for the first two secrets with:
+
+```bash
+base64 -i DeveloperIDApplication.p12 | pbcopy
+```
+
+Add a `release` environment in the repository settings with required reviewers if the signing secrets should not be usable without approval, and set the workflow's `environment:` to it.
+
 ## Install
 
 ```bash

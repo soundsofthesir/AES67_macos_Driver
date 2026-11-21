@@ -53,6 +53,7 @@ ln -s "$DIR/elsewhere.json" "$AES67_CONFIG_PATH"
 "$CTL" list 2>/dev/null >/dev/null
 check "a symlinked streams file is refused" '[ $? -eq 1 ]'
 
+# shellcheck disable=SC2034  # used through check's eval below
 out="$("$CTL" version)"
 check "version prints its own version, build and commit" '[ $? -eq 0 ] && grep -Eq "^aes67ctl   [0-9]+\.[0-9]+\.[0-9]+ build [0-9]+ \([0-9a-z-]+\)$" <<<"$out"'
 check "version reports the installed and running driver" 'grep -q "^installed  " <<<"$out" && grep -q "^running    " <<<"$out"'
