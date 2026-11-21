@@ -1,0 +1,167 @@
+name: Release
+
+# Builds the installer the README points testers at: signed with a Developer ID
+# Application certificate, signed again as a .pkg with a Developer ID Installer
+# certificate, notarized and stapled, then attached to a GitHub Release with a
+# checksum.
+#
+# Required repository secrets:
+#   DEVELOPER_ID_APP_P12, DEVELOPER_ID_APP_PASSWORD
+#   DEVELOPER_ID_INSTALLER_P12, DEVELOPER_ID_INSTALLER_PASSWORD
+#   KEYCHAIN_PASSWORD            (any password; the temporary keychain's)
+#   NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD
+#
+# Til then, Installer/README.md describes the same steps for a local run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to release, for example v0.1.0
+        required: true
+
+permissions:
+  contents: write # create the release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ASPL_VERSION: v3.1.2
+  NOTARY_PROFILE: aes67-notary
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The tag is the public version; VERSION.txt is what the driver and
+      # aes67ctl report. A mismatch means one of them is lying to testers.
+      - name: Check the tag matches VERSION.txt
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          short="$(sed -E 's/-build\..*$//' VERSION.txt | tr -d '[:space:]')"
+          build="$(cat VERSION.txt | tr -d '[:space:]')"
+          case "$TAG" in
+            "v$short"|"v$build") echo "releasing $TAG (VERSION.txt: $build)" ;;
+            *) echo "tag $TAG does not match VERSION.txt ($build)" >&2; exit 1 ;;
+          esac
+
+      - name: Import signing certificates
+        env:
+          APP_P12: ${{ secrets.DEVELOPER_ID_APP_P12 }}
+          APP_PASSWORD: ${{ secrets.DEVELOPER_ID_APP_PASSWORD }}
+          INSTALLER_P12: ${{ secrets.DEVELOPER_ID_INSTALLER_P12 }}
+          INSTALLER_PASSWORD: ${{ secrets.DEVELOPER_ID_INSTALLER_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          printf '%s' "$APP_P12" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          printf '%s' "$INSTALLER_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$keychain" -P "$APP_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security import "$RUNNER_TEMP/installer.p12" -k "$keychain" -P "$INSTALLER_PASSWORD" \
+            -T /usr/bin/productsign -T /usr/bin/productbuild -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          security list-keychains -d user | tr -d '"' \
+            | xargs security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: >
+          xcrun notarytool store-credentials "$NOTARY_PROFILE"
+          --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$PASSWORD"
+
+      # Same pinned universal libASPL as CI, built for the driver's minimum OS
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix"
+
+      - name: Build
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      # A signed package is not worth building from a bundle that is missing a
+      # slice or claims a newer minimum macOS than the README
+      - name: Check bundle metadata
+        run: .github/scripts/check-bundle.sh build .
+
+      - name: Build, sign and notarize the package
+        env:
+          REQUIRE_SIGNING: "1"
+        run: Installer/build-installer.sh
+
+      - name: Verify the signature and the notarization ticket
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(Installer/output/AES67Driver-*.pkg)
+          shopt -u nullglob
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "expected one package in Installer/output, found ${#packages[@]}" >&2
+            exit 1
+          fi
+          pkg="${packages[0]}"
+          pkgutil --check-signature "$pkg"
+          spctl --assess --type install -vv "$pkg"
+          codesign --verify --deep --strict \
+            "Installer/payload/Library/Audio/Plug-Ins/HAL/AES67Driver.driver"
+          codesign --verify --strict "Installer/payload/usr/local/bin/aes67ctl"
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+
+      - name: Write the checksum
+        run: |
+          cd "$(dirname "$PKG")"
+          shasum -a 256 "$(basename "$PKG")" > "$(basename "$PKG").sha256"
+          cat "$(basename "$PKG").sha256"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: >
+          gh release create "$TAG" "$PKG" "$PKG.sha256"
+          --title "AES67 Driver $(sed -E 's/-build\..*$//' VERSION.txt)"
+          --generate-notes
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

@@ -10,6 +10,8 @@
 # Needs the libuuid headers (Debian/Ubuntu: uuid-dev) for Shared/Types.h.
 #
 # Usage: Tests/Linux/run-portable-tests.sh [build-dir]   (CXX picks the compiler)
+#        COVERAGE=1 ... adds llvm-cov instrumentation and writes one .profraw
+#        per test into the build dir (ci.yml merges them).
 
 set -euo pipefail
 
@@ -18,12 +20,21 @@ SHIM="$ROOT/Tests/Linux/shim"
 OUT="${1:-$ROOT/build-linux}"
 CXX="${CXX:-g++}"
 mkdir -p "$OUT"
+# Absolute from here on: the tests run with $OUT as their working directory,
+# and LLVM_PROFILE_FILE below must not be resolved a second time
+OUT="$(cd "$OUT" && pwd)"
 
 # F_FULLFSYNC is macOS-only; -1 makes that fcntl() fail, so StreamConfig
-# falls back to fsync() as it would on a filesystem without full sync
+# falls back to fsync() as it would on a filesystem without full sync.
+# shellcheck disable=SC2054  # the commas are inside -fsanitize=..., not separators
 FLAGS=(-std=c++17 -g -O1 -Wall -Wextra -UNDEBUG
        -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
        -pthread -I"$ROOT" -I"$SHIM" -DF_FULLFSYNC=-1)
+
+# COVERAGE=1 instruments every binary for llvm-cov (see ci.yml).
+if [[ "${COVERAGE:-0}" == "1" ]]; then
+    FLAGS+=(-fprofile-instr-generate -fcoverage-mapping)
+fi
 
 export ASAN_OPTIONS="detect_leaks=1:abort_on_error=1"
 export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
@@ -38,7 +49,7 @@ run() {
     if ! "$CXX" "${FLAGS[@]}" "${EXTRA_DEFS[@]}" "${sources[@]}" -o "$OUT/$name"; then
         echo "BUILD FAILED: $name"
         failed+=("$name (build)")
-    elif ! (cd "$OUT" && timeout 600 "./$name"); then
+    elif ! (cd "$OUT" && LLVM_PROFILE_FILE="$OUT/$name-%p.profraw" timeout 600 "./$name"); then
         echo "TEST FAILED: $name"
         failed+=("$name")
     fi
@@ -61,6 +72,8 @@ run TestAes67ctl       Tests/TestAes67ctl.cpp Tools/aes67ctl/Checks.cpp Tools/ae
 run TestRxTimestamp     Tests/TestRxTimestamp.cpp NetworkEngine/RTP/RtpPlacement.cpp \
                         NetworkEngine/Clock/TimestampedAudioBuffer.cpp
 run TestSAPListener     Tests/TestSAPListener.cpp NetworkEngine/Discovery/SAPListener.cpp
+run TestRtspClient      Tests/TestRtspClient.cpp NetworkEngine/Discovery/RTSPClient.cpp \
+                        Driver/SDPParser.cpp Shared/Types.cpp
 run TestPtpMessages     Tests/TestPtpMessages.cpp NetworkEngine/PTP/PtpMessages.cpp
 run TestPtpBestMaster   Tests/TestPtpBestMaster.cpp NetworkEngine/PTP/PtpBestMaster.cpp NetworkEngine/PTP/PtpMessages.cpp
 run TestPtpSyncPairer   Tests/TestPtpSyncPairer.cpp

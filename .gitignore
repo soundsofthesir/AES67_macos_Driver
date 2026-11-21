@@ -1,5 +1,6 @@
 # Build directories
 build/
+build-*/
 build-pkg/
 combined-pkg/
 *.xcodeproj/xcuserdata/
@@ -90,3 +91,7 @@ ManagerApp/.build/
 
 # Serena plugin
 .serena/
+
+# Python bytecode from the CI scripts
+__pycache__/
+*.pyc

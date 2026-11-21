@@ -6,10 +6,12 @@
 #
 # seconds = 0 (the default) replays the committed corpus once: deterministic,
 # for every PR. seconds > 0 fuzzes each target for that long, starting from
-# the corpus; new inputs go to the build dir, crashes to <build-dir>/crashes.
-# When a crash is fixed, add its input to Tests/Fuzz/corpus/<target>/.
+# the corpus, with one worker per core (JOBS overrides); new inputs go to the
+# build dir, crashes to <build-dir>/crashes. When a crash is fixed, add its
+# input to Tests/Fuzz/corpus/<target>/.
 #
-# Needs clang with the libFuzzer runtime (Linux), and the libuuid headers.
+# Needs clang with the libFuzzer runtime (the clang package on Linux; Xcode's
+# clang or Homebrew LLVM on macOS) and, on Linux, the libuuid headers.
 
 set -euo pipefail
 
@@ -19,9 +21,19 @@ OUT="${2:-$ROOT/build-fuzz}"
 CXX="${CXX:-clang++}"
 mkdir -p "$OUT/crashes"
 
-# Same Linux stand-ins as Tests/Linux/run-portable-tests.sh
+# The shim and the F_FULLFSYNC override are Linux-only; on macOS the real
+# headers are used.
+# shellcheck disable=SC2054  # the commas are inside -fsanitize=..., not separators
 FLAGS=(-std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined
-       -fno-omit-frame-pointer -pthread -I"$ROOT" -I"$ROOT/Tests/Linux/shim" -DF_FULLFSYNC=-1)
+       -fno-omit-frame-pointer -pthread -I"$ROOT")
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    FLAGS+=(-I"$ROOT/Tests/Linux/shim" -DF_FULLFSYNC=-1)
+fi
+
+# One worker per core: the open-ended run gets every core for the same wall
+# clock, and each worker keeps its own corpus and artifacts.
+JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)}"
+[[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
 
 export ASAN_OPTIONS="detect_leaks=1:abort_on_error=1"
 export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
@@ -45,8 +57,9 @@ fuzz() {
         "$OUT/$name" -runs=0 -artifact_prefix="$OUT/crashes/$name-" "$seeds" || status=$?
     else
         mkdir -p "$OUT/corpus/$corpus"
-        "$OUT/$name" -max_total_time="$SECONDS_PER_TARGET" -max_len=4096 -timeout=10 \
-            -artifact_prefix="$OUT/crashes/$name-" "$OUT/corpus/$corpus" "$seeds" || status=$?
+        "$OUT/$name" -fork="$JOBS" -max_total_time="$SECONDS_PER_TARGET" -max_len=4096 -timeout=10 \
+            -print_final_stats=1 -artifact_prefix="$OUT/crashes/$name-" \
+            "$OUT/corpus/$corpus" "$seeds" || status=$?
     fi
     ((status == 0)) || failed+=("$name")
     echo "::endgroup::"
@@ -55,6 +68,8 @@ fuzz() {
 fuzz FuzzSdpParser       sdp          Tests/Fuzz/FuzzSdpParser.cpp Driver/SDPParser.cpp Shared/Types.cpp
 fuzz FuzzPtpMessages     ptp          Tests/Fuzz/FuzzPtpMessages.cpp NetworkEngine/PTP/PtpMessages.cpp
 fuzz FuzzSapAnnouncement sap          Tests/Fuzz/FuzzSapAnnouncement.cpp NetworkEngine/Discovery/SAPListener.cpp \
+                                      Driver/SDPParser.cpp Shared/Types.cpp
+fuzz FuzzRtspClient      rtsp         Tests/Fuzz/FuzzRtspClient.cpp NetworkEngine/Discovery/RTSPClient.cpp \
                                       Driver/SDPParser.cpp Shared/Types.cpp
 fuzz FuzzJson            json         Tests/Fuzz/FuzzJson.cpp NetworkEngine/Json.cpp
 fuzz FuzzStreamConfig    streamconfig Tests/Fuzz/FuzzStreamConfig.cpp NetworkEngine/StreamConfig.cpp NetworkEngine/Json.cpp \

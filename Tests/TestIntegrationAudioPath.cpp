@@ -9,6 +9,7 @@
 //
 
 #include "RxTestSupport.h"
+#include "TestWait.h"
 #include "../Driver/AudioThreadPriority.h"
 #include "../NetworkEngine/RTP/SimpleRTP.h"
 #include "../NetworkEngine/RTP/RTPReceiver.h"
@@ -362,7 +363,14 @@ bool testRingBufferToRTPTransmit() {
     StatisticsSnapshot stats = transmitter.getStatistics();
     TEST_ASSERT(stats.bytesSent > 0, "Transmitter should have sent bytes");
     const auto sent = transmitter.getTransmitStatistics().packetsSent;
-    TEST_ASSERT(sent >= 90 && sent <= 110, "about 100 packets should be sent in 100 ms");
+    // Wall-clock throughput: a loaded or instrumented (ThreadSanitizer) runner
+    // sends fewer packets in the same 100 ms, and can send a burst after it is
+    // descheduled. Ordering and continuity are checked elsewhere; this is only
+    // a limit on timing accuracy (Tests/TestWait.h).
+    const auto leastSent = TestWait::timingLimit(90u, 30u);
+    const auto mostSent = TestWait::timingLimit(110u, 160u);
+    TEST_ASSERT(sent >= leastSent && sent <= mostSent,
+                "about 100 packets should be sent in 100 ms (got " << sent << ")");
 
     std::cout << "PASS" << std::endl;
     return true;

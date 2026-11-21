@@ -310,6 +310,20 @@ target_include_directories(TestSAPListener PRIVATE
 
 target_compile_features(TestSAPListener PRIVATE cxx_std_17)
 
+# Test: RTSP responses from the server (untrusted input)
+add_executable(TestRtspClient
+    TestRtspClient.cpp
+    ../NetworkEngine/Discovery/RTSPClient.cpp
+    ../Driver/SDPParser.cpp
+    ../Shared/Types.cpp
+)
+
+target_include_directories(TestRtspClient PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestRtspClient PRIVATE cxx_std_17)
+
 # Test: Transmit on the media clock (step 2 phase 5 core)
 add_executable(TestTxMediaClock
     TestTxMediaClock.cpp
@@ -510,6 +524,7 @@ add_test(NAME MultiStream COMMAND TestMultiStream)
 add_test(NAME IntegrationAudioPath COMMAND TestIntegrationAudioPath)
 add_test(NAME SAPListener COMMAND TestSAPListener)
 add_test(NAME SAPAnnouncer COMMAND TestSAPAnnouncer)
+add_test(NAME RtspClient COMMAND TestRtspClient)
 add_test(NAME NetworkMonitor COMMAND TestNetworkMonitor)
 add_test(NAME PtpMessages COMMAND TestPtpMessages)
 add_test(NAME PtpBestMaster COMMAND TestPtpBestMaster)
@@ -529,6 +544,28 @@ if(TARGET AES67Driver)
     add_test(NAME DriverBundleSignature
              COMMAND codesign --verify --strict $<TARGET_BUNDLE_DIR:AES67Driver>)
 endif()
+
+# Tests that open sockets, join multicast groups or share ports (#132). The
+# resource lock serialises them when ctest runs with -j, and PROCESSORS 4
+# keeps the rest of the suite off the machine while one runs: their pacing and
+# PTP limits are measured in wall-clock time. Everything else runs in parallel.
+set(AES67_NETWORK_TESTS
+    CriticalPathRegressions
+    ClockRecovery
+    RTPReceiver
+    RTPTransmitter
+    TxMediaClock
+    IntegrationAudioPath
+    HalExceptions
+    SAPAnnouncer
+    PtpTimeReceiver
+    PtpClockSource
+)
+set_tests_properties(${AES67_NETWORK_TESTS} PROPERTIES
+    RESOURCE_LOCK multicast
+    LABELS network
+    PROCESSORS 4
+)
 
 message(STATUS "Tests configured:")
 message(STATUS "  - TestSDPParser")

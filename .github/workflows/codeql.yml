@@ -1,0 +1,90 @@
+name: CodeQL
+
+# Static analysis for the two languages with the most attack surface: the C++
+# parsers and network code that read the LAN, and the Swift Manager app.
+# Weekly as well as on PRs: the query packs gain checks between releases.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  ASPL_VERSION: v3.1.2
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: macos-15
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: swift
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # CodeQL traces the build, so the C++ target needs its dependency and a
+      # configured build tree before init runs
+      - name: Cache libASPL
+        if: matrix.language == 'c-cpp'
+        id: aspl-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
+
+      - name: Build libASPL
+        if: matrix.language == 'c-cpp' && steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Configure
+        if: matrix.language == 'c-cpp'
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix"
+          -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TOOLS=OFF
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build the driver and aes67ctl
+        if: matrix.language == 'c-cpp'
+        run: cmake --build build --target AES67Driver aes67ctl -j "$(sysctl -n hw.ncpu)"
+
+      - name: Build the Manager app
+        if: matrix.language == 'swift'
+        run: swift build --package-path ManagerApp --arch arm64
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          category: /language:${{ matrix.language }}

@@ -1,0 +1,163 @@
+name: Nightly
+
+# Things that are too slow or too new to block every PR:
+#   - the suite on the newest macOS runner (a new SDK or compiler warning
+#     should show up before a contributor's PR turns red for it)
+#   - the timing-sensitive tests repeated until they fail, to find flakes
+#   - the Intel slice, which the universal build links but never executes on
+#     an arm64 runner
+#
+# Failures here are a bug report, not a merge blocker. The same paths run on
+# every PR in ci.yml.
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  ASPL_VERSION: v3.1.2
+
+jobs:
+  newest-macos:
+    name: macOS 26 SDK
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Configure, build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix"
+          cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      - name: Full suite
+        env:
+          AES67_TEST_RELAXED_TIMING: "1"
+        run: >
+          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,HOME
+          "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
+          --parallel 4 --output-junit "$PWD/build/nightly-junit.xml"
+
+      # Each test repeats until it fails or passes twice. Only the tests that
+      # depend on wall-clock behaviour are worth the extra time.
+      - name: Repeat the timing-sensitive tests
+        env:
+          AES67_TEST_RELAXED_TIMING: "1"
+        run: >
+          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,HOME
+          "$(command -v ctest)" --test-dir build --output-on-failure --timeout 600
+          --parallel 2 --schedule-random --repeat until-fail:2
+          -R "Ptp|RTP|Integration|TxMediaClock|CriticalPath"
+
+      - name: Summary
+        if: always()
+        run: python3 .github/scripts/test-summary.py --title "macOS 26 (nightly)" build/nightly-junit.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-macos-26
+          path: |
+            build/nightly-junit.xml
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  intel:
+    name: Intel slice (Rosetta)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache libASPL
+        id: aspl-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: aspl-prefix
+          key: libaspl-${{ env.ASPL_VERSION }}-universal-13.0-macos-15
+
+      - name: Build libASPL
+        if: steps.aspl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$ASPL_VERSION" https://github.com/gavv/libASPL.git aspl-src
+          cmake -S aspl-src -B aspl-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/aspl-prefix"
+          cmake --build aspl-build -j "$(sysctl -n hw.ncpu)"
+          cmake --install aspl-build
+
+      - name: Make sure Rosetta is available
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      - name: Configure, build (x86_64 only)
+        run: |
+          cmake -S . -B build-intel -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DCMAKE_PREFIX_PATH="$PWD/aspl-prefix" \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          cmake --build build-intel -j "$(sysctl -n hw.ncpu)"
+
+      - name: Check the slice
+        run: |
+          archs="$(lipo -archs build-intel/AES67Driver.driver/Contents/MacOS/AES67Driver)"
+          [ "$archs" = "x86_64" ] || { echo "expected x86_64, got: $archs"; exit 1; }
+          echo "driver is $archs; the tests below execute it through Rosetta"
+
+      # The test binaries are x86_64 too: the OS runs them through Rosetta,
+      # and ctest itself stays native
+      - name: Full suite (Rosetta)
+        env:
+          AES67_TEST_RELAXED_TIMING: "1"
+        run: >
+          sudo --preserve-env=AES67_TEST_RELAXED_TIMING,HOME
+          "$(command -v ctest)" --test-dir build-intel --output-on-failure --timeout 900
+          --parallel 2 --output-junit "$PWD/build-intel/intel-junit.xml"
+
+      - name: Summary
+        if: always()
+        run: python3 .github/scripts/test-summary.py --title "Intel slice (nightly)" build-intel/intel-junit.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-intel
+          path: |
+            build-intel/intel-junit.xml
+            build-intel/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 14
