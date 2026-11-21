@@ -258,7 +258,10 @@ jobs:
 
       # Advisory: the tree predates a formatter, so these annotate the PR
       # rather than fail it. Shell and whitespace checks above are blocking.
+      # SwiftLint exits non-zero on its error-level rules (type_body_length on
+      # an existing view), and the Manager app is compiled by the macOS job.
       - name: SwiftLint (advisory)
+        continue-on-error: true
         run: swiftlint lint --quiet --reporter github-actions-logging ManagerApp
 
   static-analysis:
