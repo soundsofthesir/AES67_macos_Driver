@@ -42,7 +42,7 @@ REQUIRE_SIGNING=1 NOTARY_PROFILE=aes67-notary Installer/build-installer.sh --bui
 
 ## Releasing from CI
 
-Pushing a tag that matches `VERSION.txt` runs `.github/workflows/release.yml`. Either `v0.1.0` or `v0.1.0-build.19` is accepted for `VERSION.txt` containing `0.1.0-build.19`. The workflow builds the universal driver, signs and notarizes it with the same script as above, verifies the signature with `pkgutil` and `spctl`, and attaches the `.pkg` and its SHA-256 to a GitHub Release.
+Pushing a tag that matches `VERSION.txt` runs `.github/workflows/release.yml`. For `VERSION.txt` containing `0.1.0-build.19`, either `v0.1.0` or a prerelease such as `v0.1.0-alpha.2` is accepted. The workflow builds the universal driver, signs and notarizes it with the same script as above, verifies the signature with `pkgutil` and `spctl`, and attaches the `.pkg` and its SHA-256 to a GitHub Release.
 
 It needs these repository secrets:
 
