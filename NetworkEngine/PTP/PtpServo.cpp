@@ -13,6 +13,13 @@ double nanosBetween(uint64_t later, uint64_t earlier) {
     return static_cast<double>(static_cast<int64_t>(later - earlier));
 }
 
+double medianOf(const std::deque<double>& values) {
+    std::vector<double> sorted(values.begin(), values.end());
+    std::sort(sorted.begin(), sorted.end());
+    const size_t mid = sorted.size() / 2;
+    return sorted.size() % 2 ? sorted[mid] : 0.5 * (sorted[mid - 1] + sorted[mid]);
+}
+
 } // namespace
 
 uint64_t Servo::Estimate::masterAt(uint64_t hostNs) const {
@@ -26,6 +33,11 @@ void Servo::startTimeline() {
     samples_.clear();
     delays_.clear();
     predictionErrors_.clear();
+    recentErrors_.clear();
+    recentErrorLines_.clear();
+    negativeStepBaselineLine_.reset();
+    negativeRecoveryCooldown_ = 0;
+    congestionRecoveryPending_ = false;
     rejected_.clear();
     stepCandidates_.clear();
     haveLine_ = false;
@@ -74,7 +86,59 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
         // How far this Sync is from where the line says it should be: zero
         // for an unqueued packet, negative by its queueing otherwise
         const double error = nanosBetween(sample.master, p0_) - envelopeOffsetAt(sample.host);
-        if (std::fabs(error) > config_.stepThresholdNs) {
+        const bool wasNegativeBiased = negativeBias();
+        recentErrors_.push_back(error);
+        recentErrorLines_.push_back(LineSnapshot{h0_, p0_, slope_, intercept_});
+        if (recentErrors_.size() > config_.stepBiasSamples) {
+            recentErrors_.pop_front();
+            recentErrorLines_.pop_front();
+        }
+        const bool isNegativeBiased = negativeBias();
+        if (!wasNegativeBiased && isNegativeBiased) {
+            // Keep the line from before the first Sync in the newly negative
+            // window. Refitting against queued Syncs can move the line and
+            // make ordinary Delay_Reqs look like corroboration of a step.
+            negativeStepBaselineLine_ = recentErrorLines_.front();
+            negativeRecoveryCooldown_ = 0;
+        } else if (wasNegativeBiased && !isNegativeBiased) {
+            // A congestion burst can leave the fitted line behind briefly.
+            // Let ordinary Syncs pull it back before interpreting positive
+            // residuals as a master-time jump.
+            negativeRecoveryCooldown_ = config_.stepBiasSamples;
+        } else if (!isNegativeBiased) {
+            negativeStepBaselineLine_.reset();
+            if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
+        }
+        // Even before the servo is settled enough to call a negative bias a
+        // step, retain evidence of it as a possible receive-queue episode.
+        // Recovery from that episode can put clean Syncs above the moving fit;
+        // don't mistake those for a positive master step until the line catches
+        // back up with several on-line predictions.
+        const bool rawNegativeBias = recentErrors_.size() >= config_.stepBiasSamples &&
+                                     medianOf(recentErrors_) < -config_.negativeStepBiasNs;
+        if (rawNegativeBias && !negativeDelayStepEvidence()) {
+            congestionRecoveryPending_ = true;
+        }
+        if (congestionRecoveryPending_) {
+            if (error <= config_.positiveStepThresholdNs) {
+                if (negativeRecoveryCooldown_ == 0) negativeRecoveryCooldown_ = config_.stepBiasSamples;
+                else if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
+                if (negativeRecoveryCooldown_ == 0) congestionRecoveryPending_ = false;
+            } else {
+                negativeRecoveryCooldown_ = config_.stepBiasSamples;
+            }
+        }
+        // Queueing never makes a Sync early, so one well above the line is a
+        // step candidate on its own. Queueing does make Syncs late, so a step
+        // down shows only as a bias in the recent errors; while that bias
+        // lasts, every Sync below the line is a candidate. Both need a settled
+        // line: a young one is too rough to tell a step from its own slope
+        const bool candidate = std::fabs(error) > config_.stepThresholdNs ||
+                               (settled() && ((error > config_.positiveStepThresholdNs &&
+                                               !isNegativeBiased && negativeRecoveryCooldown_ == 0 &&
+                                               !congestionRecoveryPending_) ||
+                                              (error < 0 && negativeBias() && negativeDelayStepEvidence())));
+        if (candidate) {
             // A step in the master's time, or a stray: only consecutive Syncs
             // that agree with each other confirm a step
             const bool agrees = stepCandidates_.empty() ||
@@ -191,6 +255,52 @@ bool Servo::settled() const {
            nanosBetween(samples_.back().host, samples_.front().host) >= config_.minSpanSeconds * 1e9;
 }
 
+bool Servo::negativeBias() const {
+    // Needs a full window on a settled line
+    if (recentErrors_.size() < config_.stepBiasSamples || !settled()) {
+        return false;
+    }
+    return medianOf(recentErrors_) < -config_.negativeStepBiasNs;
+}
+
+bool Servo::negativeDelayStepEvidence() const {
+    // Sync queueing pushes Sync errors down, but it pushes the reciprocal
+    // Delay_Req residual up. A real master-time step moves both down. Compare
+    // recent fixed delay-pair residuals with the preceding history so ordinary
+    // path delay and queueing do not look like a step.
+    // The Sync candidate needs its own multi-sample confirmation. One new
+    // Delay_Req pair is enough to distinguish the directions and allows the
+    // servo to leave Locked soon after a real step, without making a brief
+    // congestion burst look like a step once its queue drains.
+    const size_t recentCount = 1;
+    const size_t baselineCount = config_.stepBiasSamples;
+    if (!negativeStepBaselineLine_ || delays_.size() < recentCount + baselineCount) return false;
+
+    std::vector<double> baseline;
+    std::vector<double> recent;
+    const auto residual = [this](const DelayPair& d) {
+        const auto& line = *negativeStepBaselineLine_;
+        return nanosBetween(d.masterReceive, line.masterOrigin) -
+               (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
+    };
+    const size_t baselineStart = delays_.size() - recentCount - baselineCount;
+    for (size_t i = baselineStart; i < baselineStart + baselineCount; ++i) {
+        baseline.push_back(residual(delays_[i]));
+    }
+    for (size_t i = delays_.size() - recentCount; i < delays_.size(); ++i) {
+        recent.push_back(residual(delays_[i]));
+    }
+    // Compare lower envelopes, not medians. When a congestion burst ends,
+    // the newest Delay_Reqs return to their ordinary minimum while the
+    // immediately preceding baseline can still contain the burst's larger
+    // delays; comparing medians then mistakes the recovery for a negative
+    // clock step. A real negative master-time step lowers even the least-
+    // queued recent exchanges below the prior minimum.
+    const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
+    const double recentMinimum = *std::min_element(recent.begin(), recent.end());
+    return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
+}
+
 void Servo::updatePathDelay() {
     if (!haveLine_ || delays_.empty()) {
         return;
@@ -231,7 +341,10 @@ void Servo::judgeLock() {
         predicts = static_cast<double>(good) >= fraction * static_cast<double>(history);
     }
     const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
-    state_ = (enough && predicts && consistent && plausible) ? State::Locked : State::Acquiring;
+    // A negative Sync bias alone may be ordinary receive queueing. Only let it
+    // invalidate lock when a Delay_Req confirms the master's clock also moved.
+    const bool biased = negativeBias() && negativeDelayStepEvidence();
+    state_ = (enough && predicts && consistent && plausible && !biased) ? State::Locked : State::Acquiring;
 }
 
 std::optional<Servo::Estimate> Servo::estimate() const {
