@@ -32,7 +32,8 @@ fi
 
 # One worker per core: the open-ended run gets every core for the same wall
 # clock, and each worker keeps its own corpus and artifacts.
-JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
+JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)}"
+[[ "$JOBS" =~ ^[0-9]+$ ]] || JOBS=1
 
 export ASAN_OPTIONS="detect_leaks=1:abort_on_error=1"
 export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"

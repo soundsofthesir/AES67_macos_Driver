@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           title="Nightly fuzzing found a crash"
-          open="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq 'length')"
+          open="$(gh issue list --state open --search "$title in:title" --json number --jq 'length')"
           if [ "$open" != "0" ]; then
             echo "Issue already open; adding this run to it is left to the triager."
             exit 0
