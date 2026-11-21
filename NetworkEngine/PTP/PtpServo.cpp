@@ -36,6 +36,7 @@ void Servo::startTimeline() {
     recentErrors_.clear();
     recentErrorLines_.clear();
     negativeStepBaselineLine_.reset();
+    negativeStepBaselineDelayMinNs_.reset();
     negativeRecoveryCooldown_ = 0;
     congestionRecoveryPending_ = false;
     rejected_.clear();
@@ -99,15 +100,39 @@ void Servo::onSync(uint64_t hostReceiveNs, uint64_t masterSendNs, double correct
             // window. Refitting against queued Syncs can move the line and
             // make ordinary Delay_Reqs look like corroboration of a step.
             negativeStepBaselineLine_ = recentErrorLines_.front();
+            negativeStepBaselineDelayMinNs_.reset();
             negativeRecoveryCooldown_ = 0;
         } else if (wasNegativeBiased && !isNegativeBiased) {
             // A congestion burst can leave the fitted line behind briefly.
             // Let ordinary Syncs pull it back before interpreting positive
-            // residuals as a master-time jump.
+            // residuals as a master's time jump.
             negativeRecoveryCooldown_ = config_.stepBiasSamples;
         } else if (!isNegativeBiased) {
             negativeStepBaselineLine_.reset();
+            negativeStepBaselineDelayMinNs_.reset();
             if (negativeRecoveryCooldown_ > 0) --negativeRecoveryCooldown_;
+        }
+        // Bias recognition can happen before enough clean Delay_Req history
+        // exists to distinguish recovery from a step. Wait until the retained
+        // history includes older exchanges as well as the whole bias window.
+        if (isNegativeBiased && negativeStepBaselineLine_ && !negativeStepBaselineDelayMinNs_ &&
+            delays_.size() > 2 * config_.stepBiasSamples) {
+            const auto& line = *negativeStepBaselineLine_;
+            double baselineMinimum = 0.0;
+            bool haveBaseline = false;
+            const size_t baselineEnd = delays_.size() > config_.stepBiasSamples
+                ? delays_.size() - config_.stepBiasSamples
+                : 0;
+            for (size_t i = 0; i < baselineEnd; ++i) {
+                const auto& delay = delays_[i];
+                const double residual = nanosBetween(delay.masterReceive, line.masterOrigin) -
+                    (line.intercept + line.slope * nanosBetween(delay.hostSend, line.hostOrigin));
+                if (!haveBaseline || residual < baselineMinimum) {
+                    baselineMinimum = residual;
+                    haveBaseline = true;
+                }
+            }
+            if (haveBaseline) negativeStepBaselineDelayMinNs_ = baselineMinimum;
         }
         // Even before the servo is settled enough to call a negative bias a
         // step, retain evidence of it as a possible receive-queue episode.
@@ -273,32 +298,22 @@ bool Servo::negativeDelayStepEvidence() const {
     // servo to leave Locked soon after a real step, without making a brief
     // congestion burst look like a step once its queue drains.
     const size_t recentCount = 1;
-    const size_t baselineCount = config_.stepBiasSamples;
-    if (!negativeStepBaselineLine_ || delays_.size() < recentCount + baselineCount) return false;
-
-    std::vector<double> baseline;
+    if (!negativeStepBaselineLine_ || !negativeStepBaselineDelayMinNs_ || delays_.size() < recentCount) return false;
     std::vector<double> recent;
     const auto residual = [this](const DelayPair& d) {
         const auto& line = *negativeStepBaselineLine_;
         return nanosBetween(d.masterReceive, line.masterOrigin) -
                (line.intercept + line.slope * nanosBetween(d.hostSend, line.hostOrigin));
     };
-    const size_t baselineStart = delays_.size() - recentCount - baselineCount;
-    for (size_t i = baselineStart; i < baselineStart + baselineCount; ++i) {
-        baseline.push_back(residual(delays_[i]));
-    }
     for (size_t i = delays_.size() - recentCount; i < delays_.size(); ++i) {
         recent.push_back(residual(delays_[i]));
     }
-    // Compare lower envelopes, not medians. When a congestion burst ends,
-    // the newest Delay_Reqs return to their ordinary minimum while the
-    // immediately preceding baseline can still contain the burst's larger
-    // delays; comparing medians then mistakes the recovery for a negative
-    // clock step. A real negative master-time step lowers even the least-
-    // queued recent exchanges below the prior minimum.
-    const double baselineMinimum = *std::min_element(baseline.begin(), baseline.end());
+    // Compare against the pre-bias lower envelope, not only the immediately
+    // preceding delay samples. Recovery from a queue burst can lower recent
+    // samples relative to a short, fully queued baseline without lowering
+    // them below the clean path measurements from before the burst.
     const double recentMinimum = *std::min_element(recent.begin(), recent.end());
-    return recentMinimum - baselineMinimum < -0.75 * config_.negativeStepBiasNs;
+    return recentMinimum - *negativeStepBaselineDelayMinNs_ < -0.75 * config_.negativeStepBiasNs;
 }
 
 void Servo::updatePathDelay() {

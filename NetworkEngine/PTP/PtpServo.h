@@ -59,9 +59,9 @@ public:
         double holdGoodFraction{0.125};
         double stepThresholdNs{10e6};    // a Sync this far off is a step candidate
         // Queueing only delays a Sync, so a Sync this far above the line can't be
-        // queueing: a step candidate on its own. A step down is hidden by queueing
-        // (which pushes Syncs below it too), so it must show as a median bias
-        // of recent errors, past this far below the line
+        // queueing: a step candidate on its own. For a step down, Sync errors
+        // must show a bias and reciprocal Delay_Req residuals must fall below
+        // their pre-bias lower envelope; receive queueing moves those residuals up.
         double positiveStepThresholdNs{0.5e6};
         size_t stepBiasSamples{8};       // recent Syncs whose median error decides a bias
         double negativeStepBiasNs{1e6};
@@ -147,6 +147,7 @@ private:
     std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
     std::deque<LineSnapshot> recentErrorLines_;  // fitted line before each corresponding Sync
     std::optional<LineSnapshot> negativeStepBaselineLine_;
+    std::optional<double> negativeStepBaselineDelayMinNs_;
     size_t negativeRecoveryCooldown_{0};
     bool congestionRecoveryPending_{false};
     std::deque<bool> rejected_;            // per Sync received
