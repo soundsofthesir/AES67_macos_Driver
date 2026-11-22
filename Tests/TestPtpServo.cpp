@@ -219,6 +219,30 @@ void testSustainedQueueBurstsAreNotSteps() {
     }
 }
 
+// #211: a queue burst from the first Sync leaves the young line resting on
+// queued Syncs. When the queue drains, clean Syncs land above that line, which
+// must be read as the line catching up (congestion recovery), not as a step
+// up in the master's time. Seed 4 is a run in which that happens just after
+// the line settles: without the recovery guard it starts a new timeline at
+// 9.75 s.
+void testQueueRecoveryAfterStartupBurstIsNotAStep() {
+    std::cout << "Clean Syncs after a startup queue burst do not start a new timeline" << std::endl;
+    Network network;
+    network.burstEverySeconds = 10.0;
+    network.burstSeconds = 8.0;
+    network.burstMinNs = 1500000.0;
+    network.jitterNs = 3000000.0;
+    Simulation sim(Master{}, network, 8.0, 4);
+    double changedAt = 0.0;
+    for (double t = 0.125; t <= 60.0; t += 0.125) {
+        sim.runUntil(t);
+        if (changedAt == 0.0 && sim.measure().generation != 1) changedAt = t;
+    }
+    CHECK(sim.measure().generation == 1,
+          "recovery from a startup burst does not change generation (" << sim.measure().generation
+                                                                       << ", first change at " << changedAt << " s)");
+}
+
 void testHoldover() {
     std::cout << "Holdover keeps time when the master goes quiet, then resumes" << std::endl;
     Simulation sim(Master{}, Network{}, 4.0, 7);
@@ -424,6 +448,7 @@ int main() {
     testSmallGrandmasterStepIsFollowed();
     testIsolatedPositiveExcursionIsNotAStep();
     testSustainedQueueBurstsAreNotSteps();
+    testQueueRecoveryAfterStartupBurstIsNotAStep();
     testHoldover();
     testHoldoverStepIsNotLocked();
     testNoHoldoverBeforeLock();
