@@ -143,19 +143,38 @@ void testGrandmasterTimeStep() {
 // negative, left on the old line while the Syncs fall below it)
 void testSmallGrandmasterStepIsFollowed() {
     std::cout << "A jump of 1, 3 or 5 ms, either way, in the master's time is detected and followed" << std::endl;
+    constexpr double syncHz = 8.0;
+    constexpr double syncInterval = 1.0 / syncHz;
+    const Servo::Config config{};
+    // Positive steps need three agreeing Syncs (0.375 s at 8 Hz). A negative
+    // step first needs a negative bias window, which can take up to
+    // stepBiasSamples Syncs, then three agreeing candidates. Keep that 4-to-8
+    // Sync recognition delay explicit: (8 + 3) * 125 ms = 1.375 s worst case.
+    const double negativeStepLimit =
+        static_cast<double>(config.stepBiasSamples + config.stepConfirmSamples) * syncInterval;
     for (const int64_t stepNs : {1000000LL, -1000000LL, 3000000LL, -3000000LL, 5000000LL, -5000000LL}) {
-        Simulation sim(Master{}, Network{}, 8.0, 8);
+        Simulation sim(Master{}, Network{}, syncHz, 8);
         sim.runUntil(60);
         const uint32_t before = sim.measure().generation;
         sim.master().stepNs = stepNs;
-        // Never Locked while the phase is more than lockThreshold off, once the
-        // step has been in the recent Syncs long enough to be judged (a step
-        // down is only judged on the median of stepBiasSamples, 1 s at 8 Sync/s)
+        const double resetLimit = stepNs > 0 ? 0.5 : negativeStepLimit;
+        double resetDelay = 0.0;
+        for (double elapsed = syncInterval; elapsed <= resetLimit + syncInterval / 2; elapsed += syncInterval) {
+            sim.runUntil(60.0 + elapsed);
+            if (sim.measure().generation != before) {
+                resetDelay = elapsed;
+                break;
+            }
+        }
+        CHECK(resetDelay > 0.0 && resetDelay <= resetLimit,
+              "a " << stepNs / 1000000 << " ms step starts a new timeline within " << resetLimit
+                   << " s (observed " << resetDelay << " s)");
+
         int lockedWhileWrong = 0;
-        for (double t = 60.125; t <= 120.0; t += 0.125) {
+        for (double t = 60.0 + resetLimit + syncInterval; t <= 120.0; t += syncInterval) {
             sim.runUntil(t);
             const Run s = sim.measure();
-            if (t > 61.0 && std::fabs(s.phaseErrorNs) > Servo::Config{}.lockThresholdNs &&
+            if (std::fabs(s.phaseErrorNs) > config.lockThresholdNs &&
                 s.state == Servo::State::Locked) {
                 ++lockedWhileWrong;
             }
@@ -171,7 +190,7 @@ void testSmallGrandmasterStepIsFollowed() {
               "a " << stepNs / 1000000 << " ms step: path delay within 5 us of 300 us (" << r.pathDelayNs << ")");
         CHECK(lockedWhileWrong == 0,
               "a " << stepNs / 1000000 << " ms step: locked while the phase was off by over 100 us at "
-                   << lockedWhileWrong << " points after the first second");
+                   << lockedWhileWrong << " points after the reset bound");
     }
 }
 
