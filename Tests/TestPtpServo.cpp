@@ -219,6 +219,7 @@ void testSustainedQueueBurstsAreNotSteps() {
     for (const Burst burst : {Burst{1200000.0, 2000000.0, 2.0},
                               Burst{1500000.0, 3000000.0, 2.0},
                               Burst{1500000.0, 3000000.0, 5.0},
+                              Burst{600000.0, 1500000.0, 3.0},
                               Burst{1000000.0, 3000000.0, 3.0}}) {
         Network network;
         network.burstEverySeconds = 20.0;
