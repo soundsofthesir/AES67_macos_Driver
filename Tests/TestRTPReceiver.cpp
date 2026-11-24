@@ -522,6 +522,29 @@ bool testSequenceTrackerWrap() {
     return true;
 }
 
+bool testSequenceTrackerSenderRestart() {
+    std::cout << "Test: Sequence tracker resyncs after a sender restart... ";
+    // Back 10000: the restarted sender's own loss still counts, the jump does not
+    RtpSequenceTracker backward;
+    feed(backward, {20000, 20001, 20002});
+    auto count = feed(backward, {10000, 10001, 10003, 10004});
+    TEST_ASSERT(count.lost == 1, "Only 10002 is lost after a backward restart (got " << count.lost << ")");
+    TEST_ASSERT(count.outOfOrder == 0, "The restarted sequence is in order (got " << count.outOfOrder << ")");
+
+    // Forward 5000: no phantom loss for the skipped range
+    RtpSequenceTracker forward;
+    feed(forward, {0, 1, 2});
+    count = feed(forward, {5000, 5001, 5002, 5004});
+    TEST_ASSERT(count.lost == 1, "Only 5003 is lost after a forward jump (got " << count.lost << ")");
+
+    // A single stray packet far away neither restarts tracking nor counts as loss
+    RtpSequenceTracker stray;
+    count = feed(stray, {0, 1, 30000, 2, 3, 31000, 4});
+    TEST_ASSERT(count.lost == 0, "A stray packet is not loss (got " << count.lost << ")");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "AES67 RTP Receiver Unit Tests" << std::endl;
@@ -574,6 +597,7 @@ int main() {
     testSequenceTrackerDuplicate();
     testSequenceTrackerLate();
     testSequenceTrackerWrap();
+    testSequenceTrackerSenderRestart();
     std::cout << std::endl;
 
     std::cout << "========================================" << std::endl;

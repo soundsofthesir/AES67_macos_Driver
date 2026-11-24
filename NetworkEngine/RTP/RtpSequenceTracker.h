@@ -1,5 +1,6 @@
-// RtpSequenceTracker.h
-// Cumulative RTP packet loss that reordering and duplicates cannot inflate (#155)
+/// @file RtpSequenceTracker.h
+/// @brief Cumulative RTP packet loss that reordering, duplicates and sender
+/// restarts cannot inflate (#155).
 
 #pragma once
 
@@ -12,7 +13,11 @@ namespace AES67 {
 /// it, and comes back off the loss count if it arrives later within the
 /// window, so cumulative loss is the number of packets never received
 /// (RFC 3550 A.3). A packet older than the window, or one already received,
-/// changes nothing. No allocation; receive thread only.
+/// changes nothing.
+///
+/// A jump of kMaxDropout or more forward, or more than kMaxMisorder back, is
+/// not loss: two packets in sequence after it (a restarted sender) restart
+/// tracking there, as RFC 3550 A.1 does. No allocation; receive thread only.
 class RtpSequenceTracker {
 public:
     struct Update {
@@ -21,16 +26,14 @@ public:
     };
 
     Update onPacket(uint16_t sequence) noexcept {
-        if (!started_) {
-            started_ = true;
-            highest_ = sequence;
-            // Nothing before the first packet was expected, so none of it is lost
-            received_ = ~uint64_t{0};
+        if (!started_ || (resyncPending_ && sequence == resyncSequence_)) {
+            restartAt(sequence);
             return {};
         }
 
         const auto ahead = static_cast<int16_t>(sequence - highest_);
-        if (ahead > 0) {
+        if (ahead > 0 && ahead < kMaxDropout) {
+            resyncPending_ = false;
             const auto step = static_cast<uint32_t>(ahead);
             received_ = step < kWindow ? (received_ << step) | 1 : 1;
             highest_ = sequence;
@@ -38,6 +41,12 @@ public:
         }
 
         const auto behind = static_cast<uint32_t>(-static_cast<int32_t>(ahead));
+        if (ahead > 0 || behind > kMaxMisorder) {
+            // Too far to be loss or reordering: wait for the next in sequence
+            resyncPending_ = true;
+            resyncSequence_ = static_cast<uint16_t>(sequence + 1);
+            return {};
+        }
         if (behind >= kWindow) {
             return {0, true};
         }
@@ -53,8 +62,20 @@ public:
 
 private:
     static constexpr uint32_t kWindow = 64;
+    static constexpr int16_t kMaxDropout = 3000;   // RFC 3550 A.1 MAX_DROPOUT
+    static constexpr uint32_t kMaxMisorder = 100;  // RFC 3550 A.1 MAX_MISORDER
+
+    void restartAt(uint16_t sequence) noexcept {
+        started_ = true;
+        resyncPending_ = false;
+        highest_ = sequence;
+        // Nothing before the first packet was expected, so none of it is lost
+        received_ = ~uint64_t{0};
+    }
 
     bool started_{false};
+    bool resyncPending_{false};
+    uint16_t resyncSequence_{0};
     uint16_t highest_{0};
     uint64_t received_{0};  // bit n: highest_ - n has arrived
 };
