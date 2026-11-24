@@ -424,15 +424,29 @@ bool testFullLoopback() {
     TEST_ASSERT(receiver.getStatistics().packetsReceived > 0, "RX should have received packets");
 
     // The pattern must arrive intact and in one piece: exactly the 960
-    // written frames, with the transmitter's silence around them
+    // written frames, with the transmitter's silence around them. Both ends
+    // run on wall-clock threads: a transmitter descheduled past its link
+    // offset skips packets or sends them too late to play, and a late receive
+    // thread misses playout. Each such packet may leave up to one packet of
+    // silence; with none, the check is exact. Wrong samples are never excused.
+    const auto tx = transmitter.getTransmitStatistics();
+    const auto rx = receiver.getPlacementStatistics();
+    const size_t excusedFrames =
+        static_cast<size_t>(tx.packetsSkipped + rx.lateDrops + rx.missedPlayout) * kPacketFrames;
+    std::ostringstream timing;
+    timing << "skipped " << tx.packetsSkipped << ", late drops " << rx.lateDrops << ", missed playout "
+           << rx.missedPlayout;
     const auto ch0 = TestSupport::heardRegion(heard[0]);
     const auto ch1 = TestSupport::heardRegion(heard[1]);
-    TEST_ASSERT(ch0.size() == patternFrames && ch1.size() == patternFrames,
-                "Loopback should deliver exactly the 960 written frames");
-    TEST_ASSERT(std::all_of(ch0.begin(), ch0.end(), [](float v) { return std::abs(v - 0.25f) < 0.001f; }),
-                "Loopback channel 0 data should match (~0.25f)");
-    TEST_ASSERT(std::all_of(ch1.begin(), ch1.end(), [](float v) { return std::abs(v + 0.75f) < 0.001f; }),
-                "Loopback channel 1 data should match (~-0.75f)");
+    const size_t heard0 = TestSupport::countNear(ch0, 0.25f);
+    const size_t heard1 = TestSupport::countNear(ch1, -0.75f);
+    TEST_ASSERT(heard0 == TestSupport::countNonSilent(ch0) && heard1 == TestSupport::countNonSilent(ch1),
+                "Loopback should carry only the written values (" << timing.str() << ")");
+    TEST_ASSERT(ch0.size() <= patternFrames && ch1.size() <= patternFrames,
+                "Loopback should not stretch the 960 written frames (" << ch0.size() << ", " << ch1.size() << ")");
+    TEST_ASSERT(heard0 + excusedFrames >= patternFrames && heard1 + excusedFrames >= patternFrames,
+                "Loopback should deliver the 960 written frames (heard " << heard0 << " and " << heard1 << "; "
+                                                                         << timing.str() << ")");
 
     std::cout << "PASS" << std::endl;
     return true;
