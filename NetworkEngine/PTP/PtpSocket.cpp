@@ -1,6 +1,7 @@
 /// @file PtpSocket.cpp
 
 #include "PtpSocket.h"
+#include "../Clock/HostTime.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -104,7 +105,9 @@ long Socket::receive(uint8_t* buffer, size_t size, uint64_t& hostTicks, uint32_t
     }
     for (cmsghdr* c = CMSG_FIRSTHDR(&message); c; c = CMSG_NXTHDR(&message, c)) {
         if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMP_MONOTONIC) {
-            std::memcpy(&hostTicks, CMSG_DATA(c), sizeof(hostTicks));
+            uint64_t kernelTicks = 0;
+            std::memcpy(&kernelTicks, CMSG_DATA(c), sizeof(kernelTicks));
+            hostTicks = hostTimeFromKernelTimestamp(kernelTicks);
         }
     }
     sourceAddress = source.sin_addr.s_addr;

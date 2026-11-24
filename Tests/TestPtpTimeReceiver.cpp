@@ -224,6 +224,33 @@ void testHoldoverWhenSyncsStop() {
 
 } // namespace
 
+// The kernel stamps receive times in native ticks; an x86_64 build under
+// Rosetta sees mach_absolute_time() in nanoseconds, 41.67x as many. Every
+// receive time must come back in the same ticks as hostTimeNow().
+void testKernelReceiveTimeIsHostTime() {
+    std::cout << "Kernel receive times are in host ticks" << std::endl;
+    Socket socket;
+    Socket::Options options;
+    options.port = static_cast<uint16_t>(kEventPort + 5);  // this binary's range, unused by the masters
+    options.bindAddress = "127.0.0.1";
+    CHECK(socket.open(options), "opens a loopback socket");
+    const uint8_t byte = 1;
+    const uint64_t before = hostTimeNow();
+    CHECK(socket.sendTo("127.0.0.1", options.port, &byte, 1), "sends to itself");
+    uint8_t buffer[16];
+    uint64_t received = 0;
+    uint32_t source = 0;
+    long bytes = 0;
+    for (int i = 0; i < 200 && bytes == 0; ++i) {
+        bytes = socket.receive(buffer, sizeof(buffer), received, source);
+        if (bytes == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const uint64_t after = hostTimeNow();
+    CHECK(bytes == 1 && received != 0, "receives with a kernel timestamp");
+    CHECK(received >= before && received <= after,
+          "stamped between the send and the read (" << received << " not in " << before << ".." << after << ")");
+}
+
 int main(int argc, char** argv) {
     // Optional: run only the tests whose names contain argv[1]
     const std::string only = argc > 1 ? argv[1] : "";
@@ -235,6 +262,7 @@ int main(int argc, char** argv) {
         {"betterMaster", testSwitchesToABetterMaster},
         {"holdover", testHoldoverWhenTheMasterGoes},
         {"syncsStop", testHoldoverWhenSyncsStop},
+        {"kernelTime", testKernelReceiveTimeIsHostTime},
     };
     for (const auto& [name, test] : tests) {
         if (only.empty() || std::string(name).find(only) != std::string::npos) test();

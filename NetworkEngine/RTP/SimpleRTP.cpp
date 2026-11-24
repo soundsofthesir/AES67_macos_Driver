@@ -5,6 +5,7 @@
 //
 
 #include "SimpleRTP.h"
+#include "../Clock/HostTime.h"
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
@@ -238,7 +239,9 @@ ssize_t RTPSocket::receive(RTPPacket& packet, uint8_t* buffer, size_t bufferSize
         *kernelHostTime = 0;
         for (struct cmsghdr* c = CMSG_FIRSTHDR(&msg); bytesReceived >= 0 && c; c = CMSG_NXTHDR(&msg, c)) {
             if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMP_MONOTONIC) {
-                memcpy(kernelHostTime, CMSG_DATA(c), sizeof(uint64_t));
+                uint64_t kernelTicks = 0;
+                memcpy(&kernelTicks, CMSG_DATA(c), sizeof(kernelTicks));
+                *kernelHostTime = hostTimeFromKernelTimestamp(kernelTicks);
             }
         }
     }
