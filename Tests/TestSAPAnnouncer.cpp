@@ -123,7 +123,6 @@ void testAnnounceRepeatAndWithdraw() {
     CHECK(announcer.sessionCount() == 1, "one session announced");
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));
     announcer.withdraw(id);
-    const auto withdrawnAt = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     const auto packets = capture.packets();
 
@@ -131,13 +130,18 @@ void testAnnounceRepeatAndWithdraw() {
     size_t deletions = 0;
     size_t afterWithdrawal = 0;
     bool sameHash = true;
+    // Judged by arrival order, not by the capture thread's clock: that thread
+    // stamps a packet when it reads it, so on a loaded machine an announcement
+    // sent before withdraw() can be stamped after it. The announcer sends
+    // under one lock and loopback delivers in order, so any announcement
+    // after the deletion was sent after it.
     for (const auto& p : packets) {
         sameHash = sameHash && hashOf(p.bytes) == hashOf(packets.front().bytes);
         if (isDeletion(p)) {
             ++deletions;
         } else {
             ++announcements;
-            if (p.at > withdrawnAt) ++afterWithdrawal;
+            if (deletions > 0) ++afterWithdrawal;
         }
     }
     CHECK(!packets.empty() && packets.front().at - start < std::chrono::milliseconds(100),
