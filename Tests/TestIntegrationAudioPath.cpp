@@ -650,12 +650,13 @@ bool testEncodingRoundTrip() {
         size_t readCount = ringBuffer.read(readBack.data(), numSamples);
         TEST_ASSERT(readCount == numSamples, "L16: should read all samples from ring buffer");
 
-        // Verify L16 precision (~0.01 tolerance)
+        // Verify L16 precision: within 1 LSB. The sine peaks at exactly +1.0,
+        // which has no int16 code, so the worst error is exactly 1 LSB.
         double maxError = 0.0;
         for (size_t i = 0; i < numSamples; ++i) {
             maxError = std::max(maxError, static_cast<double>(std::abs(readBack[i] - original[i])));
         }
-        TEST_ASSERT(maxError < 0.01, "L16 round-trip error should be < 0.01");
+        TEST_ASSERT(maxError <= 1.0 / 32768.0, "L16 round-trip error should be <= 1 LSB");
     }
 
     // L24 round-trip via codec
@@ -675,12 +676,12 @@ bool testEncodingRoundTrip() {
         size_t readCount = ringBuffer.read(readBack.data(), numSamples);
         TEST_ASSERT(readCount == numSamples, "L24: should read all samples from ring buffer");
 
-        // Verify L24 precision (~0.001 tolerance)
+        // Verify L24 precision: within 1 LSB (same +1.0 peak as above)
         double maxError = 0.0;
         for (size_t i = 0; i < numSamples; ++i) {
             maxError = std::max(maxError, static_cast<double>(std::abs(readBack[i] - original[i])));
         }
-        TEST_ASSERT(maxError < 0.001, "L24 round-trip error should be < 0.001");
+        TEST_ASSERT(maxError <= 1.0 / 8388608.0, "L24 round-trip error should be <= 1 LSB");
     }
 
     std::cout << "PASS" << std::endl;

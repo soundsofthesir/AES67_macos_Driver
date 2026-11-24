@@ -55,10 +55,11 @@ constexpr size_t kDeviceChannels = 128;
 // is still ahead of the transmitter.
 constexpr int64_t kWriteAhead = 2048;
 
-// A sample whose 24-bit PCM value is exactly its media position (the L24
-// encoder truncates, hence the half step)
+// A sample whose 24-bit PCM value is exactly its media position: the L24
+// encoder multiplies by 2^23 and rounds, so position / 2^23 encodes to exactly
+// position (exact in float while position < 2^24; the tests run for seconds)
 float positionValue(int64_t position) {
-    return static_cast<float>((static_cast<double>(position) + 0.5) / 8388607.0);
+    return static_cast<float>(static_cast<double>(position) / 8388608.0);
 }
 
 SDPSession txSdp(const char* group, uint16_t port) {
