@@ -792,6 +792,49 @@ bool testReceiverStatistics() {
 }
 
 // ============================================================================
+// Test 9b: Loss accounting survives reordering, duplicates and wraparound (#155)
+// ============================================================================
+
+bool testReceiverLossWithReordering() {
+    std::cout << "Test: Receiver loss count with reordered, duplicate and late packets... ";
+
+    SDPSession sdp = createTestSDP("Reorder RX", "239.69.69.10", 15022, 2, "L16");
+    ChannelMapping mapping = createTestMapping(StreamID::generate(), "Reorder RX", 2, 0);
+    TestSupport::RxHarness harness;
+    RTPReceiver receiver(sdp, mapping, harness.context());
+    receiver.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::vector<float> audio(48 * 2, 0.0f);
+    std::vector<uint8_t> payload(audio.size() * 2);
+    L16Codec::encode(audio.data(), audio.size(), payload.data());
+
+    // Packet n carries sequence 65530 + n, so the run crosses the 16-bit wrap.
+    // 4 and 5 swap, 6 is duplicated, 8 arrives late after 11, and 13 is the
+    // only packet really lost.
+    const int order[] = {0, 1, 2, 3, 5, 4, 6, 6, 7, 9, 10, 11, 8, 12, 14, 15};
+    TestSupport::SendPacer pacer;
+    for (const int n : order) {
+        const auto seq = static_cast<uint16_t>(65530 + n);
+        sendRawRTPPacket("239.69.69.10", 15022, seq, static_cast<uint32_t>(n) * 48, 0x55555555, PT_AES67_L16,
+                         payload.data(), payload.size());
+        pacer.wait();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    receiver.stop();
+
+    const StatisticsSnapshot stats = receiver.getStatistics();
+    TEST_ASSERT(stats.packetsReceived == 16, "Should receive all 16 packets sent (got " << stats.packetsReceived << ")");
+    TEST_ASSERT(stats.malformedPackets == 0, "Should have no malformed packets");
+    TEST_ASSERT(stats.packetsLost == 1, "Only packet 13 is lost (got " << stats.packetsLost << ")");
+    TEST_ASSERT(stats.outOfOrderPackets == 3,
+                "The swapped, duplicate and late packets are out of order (got " << stats.outOfOrderPackets << ")");
+
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+// ============================================================================
 // Test 10: Transmitter Continuous Packet Flow
 // ============================================================================
 
@@ -878,6 +921,7 @@ int main() {
     std::cout << "Statistics Tests:" << std::endl;
     std::cout << "----------------" << std::endl;
     testReceiverStatistics();
+    testReceiverLossWithReordering();
     std::cout << std::endl;
 
     std::cout << "Continuous Flow Tests:" << std::endl;

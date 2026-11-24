@@ -10,6 +10,7 @@
 #include "../Clock/TimestampedAudioBuffer.h"
 #include "SimpleRTP.h"
 #include "RtpPlacement.h"
+#include "RtpSequenceTracker.h"
 #include "RxContext.h"
 #include "../../Driver/AudioThreadPriority.h"
 #include <thread>
@@ -153,7 +154,7 @@ private:
 
     // Statistics
     Statistics stats_;
-    std::atomic<uint16_t> lastSequenceNumber_{0};
+    RtpSequenceTracker sequence_;  // receive thread only
     std::atomic<uint64_t> lateDrops_{0};
     std::atomic<uint64_t> earlyDrops_{0};
     std::atomic<uint64_t> foreignDrops_{0};

@@ -5,12 +5,15 @@
 //
 
 #include "../NetworkEngine/RTP/SimpleRTP.h"
+#include "../NetworkEngine/RTP/RtpSequenceTracker.h"
 #include "../Driver/SDPParser.h"
 #include "../NetworkEngine/StreamChannelMapper.h"
 #include <iostream>
 #include <cassert>
 #include <vector>
 #include <algorithm>
+#include <cstdint>
+#include <initializer_list>
 
 using namespace AES67;
 using namespace AES67::RTP;
@@ -427,6 +430,98 @@ bool testParseRejectsTruncated() {
 // Main Test Runner
 //
 
+//
+// Sequence tracking (#155)
+//
+
+namespace {
+struct LossCount {
+    int64_t lost{0};
+    int outOfOrder{0};
+};
+
+LossCount feed(RtpSequenceTracker& tracker, std::initializer_list<uint16_t> sequences) {
+    LossCount count;
+    for (const uint16_t sequence : sequences) {
+        const auto update = tracker.onPacket(sequence);
+        count.lost += update.lostDelta;
+        count.outOfOrder += update.outOfOrder ? 1 : 0;
+    }
+    return count;
+}
+} // namespace
+
+bool testSequenceTrackerReorder() {
+    std::cout << "Test: Sequence tracker counts a swapped pair as no loss... ";
+    RtpSequenceTracker tracker;
+    auto count = feed(tracker, {10, 11, 13, 12, 14});
+    TEST_ASSERT(count.lost == 0, "A swapped pair loses nothing (got " << count.lost << ")");
+    TEST_ASSERT(count.outOfOrder == 1, "Only the late half of the pair is out of order");
+
+    // One real loss next to a reorder is one loss, not three
+    RtpSequenceTracker withLoss;
+    count = feed(withLoss, {0, 1, 3, 2, 5, 6});
+    TEST_ASSERT(count.lost == 1, "Only packet 4 is lost (got " << count.lost << ")");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testSequenceTrackerDuplicate() {
+    std::cout << "Test: Sequence tracker ignores duplicates... ";
+    RtpSequenceTracker tracker;
+    auto count = feed(tracker, {5, 6, 6, 7, 5, 8});
+    TEST_ASSERT(count.lost == 0, "Duplicates lose nothing (got " << count.lost << ")");
+    TEST_ASSERT(count.outOfOrder == 2, "Both duplicates are out of order");
+
+    // A duplicate of a lost packet's neighbour must not cancel the loss
+    RtpSequenceTracker withLoss;
+    count = feed(withLoss, {0, 2, 2, 0, 3});
+    TEST_ASSERT(count.lost == 1, "Packet 1 is still lost (got " << count.lost << ")");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testSequenceTrackerLate() {
+    std::cout << "Test: Sequence tracker takes a late packet off the loss count... ";
+    RtpSequenceTracker tracker;
+    auto count = feed(tracker, {0, 1, 3, 4, 5});
+    TEST_ASSERT(count.lost == 1, "Packet 2 counts as lost once passed");
+    count = feed(tracker, {2, 2, 6});
+    TEST_ASSERT(count.lost == -1, "Packet 2 arriving late recovers it, once");
+
+    // Beyond the 64-packet window a late packet changes nothing
+    RtpSequenceTracker far;
+    feed(far, {100});
+    count = feed(far, {102});
+    TEST_ASSERT(count.lost == 1, "Packet 101 is lost");
+    for (uint16_t s = 103; s < 103 + 64; ++s) {
+        feed(far, {s});
+    }
+    count = feed(far, {101});
+    TEST_ASSERT(count.lost == 0 && count.outOfOrder == 1, "A packet older than the window stays lost");
+
+    // Packets from before the first one received were never expected
+    RtpSequenceTracker first;
+    count = feed(first, {50, 48, 49, 51});
+    TEST_ASSERT(count.lost == 0, "Packets before the first are not loss (got " << count.lost << ")");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
+bool testSequenceTrackerWrap() {
+    std::cout << "Test: Sequence tracker across the 16-bit wrap... ";
+    RtpSequenceTracker tracker;
+    auto count = feed(tracker, {65533, 65534, 0, 65535, 1, 3});
+    TEST_ASSERT(count.lost == 1, "Only packet 2 is lost across the wrap (got " << count.lost << ")");
+    TEST_ASSERT(count.outOfOrder == 1, "65535 after 0 is out of order");
+
+    tracker.reset();
+    count = feed(tracker, {7, 9});
+    TEST_ASSERT(count.lost == 1, "After a reset tracking starts again from the next packet");
+    std::cout << "PASS" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "AES67 RTP Receiver Unit Tests" << std::endl;
@@ -471,6 +566,14 @@ int main() {
     std::cout << "Timestamp Tests:" << std::endl;
     std::cout << "---------------" << std::endl;
     testTimestampCalculation();
+    std::cout << std::endl;
+
+    std::cout << "Sequence Tracking Tests:" << std::endl;
+    std::cout << "-----------------------" << std::endl;
+    testSequenceTrackerReorder();
+    testSequenceTrackerDuplicate();
+    testSequenceTrackerLate();
+    testSequenceTrackerWrap();
     std::cout << std::endl;
 
     std::cout << "========================================" << std::endl;

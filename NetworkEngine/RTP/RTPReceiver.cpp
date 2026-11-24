@@ -234,7 +234,6 @@ void RTPReceiver::resetStatistics() {
     stats_.latencyNs.store(0, std::memory_order_relaxed);
     stats_.bytesReceived.store(0, std::memory_order_relaxed);
     stats_.bytesSent.store(0, std::memory_order_relaxed);
-    lastSequenceNumber_.store(0, std::memory_order_relaxed);
 }
 
 bool RTPReceiver::isConnected() const {
@@ -491,23 +490,21 @@ void RTPReceiver::publishPlacementStatistics() {
 }
 
 void RTPReceiver::updateStats(uint16_t sequenceNumber, size_t payloadSize) {
-    // Detect packet loss (sequence number gaps). Signed 16-bit arithmetic
-    // distinguishes forward gaps (lost packets) from backward gaps
-    // (reordered/duplicate packets), even across 16-bit wraparound.
-    uint64_t currentPacketCount = stats_.packetsReceived.load(std::memory_order_relaxed);
-    if (currentPacketCount > 0) {
-        uint16_t expected = lastSequenceNumber_.load(std::memory_order_relaxed) + 1;
-        if (sequenceNumber != expected) {
-            int16_t gap = static_cast<int16_t>(sequenceNumber - expected);
-            if (gap > 0) {
-                stats_.packetsLost.fetch_add(static_cast<uint64_t>(gap), std::memory_order_relaxed);
-            } else {
-                stats_.outOfOrderPackets.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
+    // A reset (from another thread) zeroes packetsReceived; start the
+    // sequence tracking again from the next packet
+    if (stats_.packetsReceived.load(std::memory_order_relaxed) == 0) {
+        sequence_.reset();
+    }
+    const RtpSequenceTracker::Update update = sequence_.onPacket(sequenceNumber);
+    if (update.lostDelta > 0) {
+        stats_.packetsLost.fetch_add(static_cast<uint64_t>(update.lostDelta), std::memory_order_relaxed);
+    } else if (update.lostDelta < 0 && stats_.packetsLost.load(std::memory_order_relaxed) > 0) {
+        stats_.packetsLost.fetch_sub(1, std::memory_order_relaxed);
+    }
+    if (update.outOfOrder) {
+        stats_.outOfOrderPackets.fetch_add(1, std::memory_order_relaxed);
     }
 
-    lastSequenceNumber_.store(sequenceNumber, std::memory_order_relaxed);
     stats_.packetsReceived.fetch_add(1, std::memory_order_relaxed);
     stats_.bytesReceived.fetch_add(payloadSize, std::memory_order_relaxed);
 }
