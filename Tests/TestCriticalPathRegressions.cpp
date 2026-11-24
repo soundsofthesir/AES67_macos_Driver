@@ -268,6 +268,25 @@ std::string stallSummary(const SendPacer& pacer) {
     return out.str();
 }
 
+// Sends a restart run, then carries it on while the sender stalled too
+// recently: a stall resets the receiver's run of agreeing packets, so
+// without a stall-free stretch of kSwitchRunPackets nothing can confirm the
+// restart and a receiver that does follow restarts would play nothing.
+// Returns how many packets were sent.
+uint16_t sendRestartRun(LoopbackSender& sender, SendPacer& pacer, uint16_t firstSeq, uint32_t firstTimestamp,
+                        uint16_t count, float value, uint32_t ssrc) {
+    constexpr uint16_t kMaxExtra = 1000;
+    constexpr uint32_t kCleanRun = static_cast<uint32_t>(kSwitchRunPackets) + 10;
+    sendRun(sender, pacer, firstSeq, firstTimestamp, count, value, ssrc);
+    uint16_t sent = count;
+    while (pacer.stalls() > 0 && pacer.sendsSinceStall() < kCleanRun && sent < count + kMaxExtra) {
+        sender.sendL24(static_cast<uint16_t>(firstSeq + sent), firstTimestamp + sent * kFramesPerPacket, 2, value, ssrc);
+        pacer.wait();
+        ++sent;
+    }
+    return sent;
+}
+
 // RT-safe interface over a harness's receive context plus TX ring buffers
 struct IOFixture {
     RxHarness harness;
@@ -1977,11 +1996,12 @@ void testReceiverFollowsSenderRestart() {
 
     RTPReceiver::PlacementStatistics stats{};
     SendPacer pacer = restartPacer();
-    const auto samples = receiveAndListen("239.69.99.3", 55012, [&pacer](LoopbackSender& sender) {
+    uint16_t sent = 0;
+    const auto samples = receiveAndListen("239.69.99.3", 55012, [&pacer, &sent](LoopbackSender& sender) {
         sendRun(sender, pacer, 1000, 0, 40, 0.25f, 0x12345678);
         pacer.clearCounts();
         // Sender restarts with a new SSRC and unrelated sequence and timestamp bases
-        sendRun(sender, pacer, 40000, 900000, 200, -0.5f, 0x0BADF00D);
+        sent = sendRestartRun(sender, pacer, 40000, 900000, 200, -0.5f, 0x0BADF00D);
     }, &stats);
 
     // The switch waits for 50 ms of packets whose arrival agrees: a jittery
@@ -1989,7 +2009,8 @@ void testReceiverFollowsSenderRestart() {
     // each sender stall may cost one more run (never following plays none)
     const size_t restarted = countNear(samples, -0.5f) / kFramesPerPacket;
     const size_t limit = restartPlayLimit(TestWait::timingLimit<size_t>(150, 75), pacer);
-    std::cout << "  restarted sender: " << restarted << " of 200 packets played, " << stallSummary(pacer) << std::endl;
+    std::cout << "  restarted sender: " << restarted << " of " << sent << " packets played, " << stallSummary(pacer)
+              << std::endl;
     CHECK(restarted >= limit, "audio from the restarted sender should play promptly (got " << restarted
                                   << " packets, want " << limit << ", " << pacer.stalls() << " sender stalls)");
     CHECK(stats.reanchors >= 1, "the restart should re-anchor");
@@ -2064,18 +2085,21 @@ void testInterleavedSecondSourceIsIgnored() {
 
 void runRestartBehindPlayout(const char* group, uint16_t port, uint32_t restartSsrc, const char* label) {
     SendPacer pacer = restartPacer();
-    const auto samples = receiveAndListen(group, port, [restartSsrc, &pacer](LoopbackSender& sender) {
+    uint16_t sent = 0;
+    const auto samples = receiveAndListen(group, port, [restartSsrc, &pacer, &sent](LoopbackSender& sender) {
         sendRun(sender, pacer, 6000, 200 * kFramesPerPacket, 60, 0.25f, 0x12345678);
         pacer.clearCounts();
         // Restart with timestamps ~150 packets behind where playout has reached
-        sendRun(sender, pacer, 5900, 110 * kFramesPerPacket, 150, -0.5f, restartSsrc);
+        sent = sendRestartRun(sender, pacer, 5900, 110 * kFramesPerPacket, 150, -0.5f, restartSsrc);
     });
 
     const size_t played = countNear(samples, -0.5f) / kFramesPerPacket;
     const size_t limit = restartPlayLimit(TestWait::timingLimit<size_t>(100, 30), pacer);
-    std::cout << "  " << label << ": " << played << " of 150 packets played, " << stallSummary(pacer) << std::endl;
+    std::cout << "  " << label << ": " << played << " of " << sent << " packets played, " << stallSummary(pacer)
+              << std::endl;
     // As above: how soon the restart is followed is a timing limit
-    CHECK(played >= limit, label << ": the restarted stream should play (got " << played << " of 150 packets, want "
+    CHECK(played >= limit, label << ": the restarted stream should play (got " << played << " of " << sent
+                                 << " packets, want "
                                  << limit << ", " << pacer.stalls() << " sender stalls)");
 }
 

@@ -215,12 +215,15 @@ public:
         lateSends_ = 0;
         stalls_ = 0;
         stalledSends_ = 0;
+        sendsSinceStall_ = 0;
         inStall_ = false;
     }
 
     uint32_t lateSends() const { return lateSends_; }
     uint32_t stalls() const { return stalls_; }
     uint32_t stalledSends() const { return stalledSends_; }
+    /// Sends judged since the last stalled one (all of them if none stalled).
+    uint32_t sendsSinceStall() const { return sendsSinceStall_; }
     double maxBehindMs() const { return std::chrono::duration<double, std::milli>(maxBehind_).count(); }
 
 private:
@@ -231,6 +234,7 @@ private:
         if (stalled) ++stalledSends_;
         if (stalled && !inStall_) ++stalls_;
         inStall_ = stalled;
+        sendsSinceStall_ = stalled ? 0 : sendsSinceStall_ + 1;
     }
 
     static constexpr auto kLateThreshold = std::chrono::microseconds(kTestLinkOffset * 1000 / 48 / 2);
@@ -242,6 +246,7 @@ private:
     uint32_t lateSends_{0};
     uint32_t stalls_{0};
     uint32_t stalledSends_{0};
+    uint32_t sendsSinceStall_{0};
     bool inStall_{false};
 };
 
