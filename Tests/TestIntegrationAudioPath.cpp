@@ -406,12 +406,17 @@ bool testFullLoopback() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     // 20 packets of a recognisable pattern; around it the transmitter sends
-    // silence (AES67 requires continuous packets)
+    // silence (AES67 requires continuous packets). Written 50 ms ahead of the
+    // transmitter. Any part it had sent before the write finished (the test
+    // thread was descheduled) went out as silence, and is excused below.
     const size_t patternFrames = 960;
     std::array<float, kNumChannels> values{};
     values[0] = 0.25f;
     values[1] = -0.75f;
-    writeOutputAhead(txRouting, harness.clock, patternFrames, values, 480);
+    const int64_t patternStart = writeOutputAhead(txRouting, harness.clock, patternFrames, values, 2400);
+    const int64_t writtenBy = harness.clock.snapshot().sampleAt(hostTimeNow());
+    const auto writtenLate = static_cast<size_t>(
+        std::clamp<int64_t>(writtenBy - patternStart, 0, static_cast<int64_t>(patternFrames)));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     transmitter.stop();
@@ -428,14 +433,16 @@ bool testFullLoopback() {
     // run on wall-clock threads: a transmitter descheduled past its link
     // offset skips packets or sends them too late to play, and a late receive
     // thread misses playout. Each such packet may leave up to one packet of
-    // silence; with none, the check is exact. Wrong samples are never excused.
+    // silence, as may a late write (above); with none, the check is exact.
+    // Wrong samples are never excused.
     const auto tx = transmitter.getTransmitStatistics();
     const auto rx = receiver.getPlacementStatistics();
     const size_t excusedFrames =
-        static_cast<size_t>(tx.packetsSkipped + rx.lateDrops + rx.missedPlayout) * kPacketFrames;
+        static_cast<size_t>(tx.packetsSkipped + rx.lateDrops + rx.missedPlayout) * kPacketFrames +
+        (writtenLate > 0 ? writtenLate + kPacketFrames : 0);
     std::ostringstream timing;
     timing << "skipped " << tx.packetsSkipped << ", late drops " << rx.lateDrops << ", missed playout "
-           << rx.missedPlayout;
+           << rx.missedPlayout << ", written " << writtenLate << " frames late";
     const auto ch0 = TestSupport::heardRegion(heard[0]);
     const auto ch1 = TestSupport::heardRegion(heard[1]);
     const size_t heard0 = TestSupport::countNear(ch0, 0.25f);
