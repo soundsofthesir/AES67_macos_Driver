@@ -6,7 +6,9 @@
 #include <atomic>
 #include <vector>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
+#include <type_traits>
 
 namespace AES67 {
 
@@ -33,9 +35,12 @@ public:
     SPSCRingBuffer(const SPSCRingBuffer&) = delete;
     SPSCRingBuffer& operator=(const SPSCRingBuffer&) = delete;
 
-    // Allow move
-    SPSCRingBuffer(SPSCRingBuffer&&) noexcept = default;
-    SPSCRingBuffer& operator=(SPSCRingBuffer&&) noexcept = default;
+    // Prevent move too. The indices are std::atomic, which cannot be moved, so
+    // the compiler-generated move operations were always defined as deleted
+    // (clang: -Wdefaulted-function-deleted); a buffer is shared between its
+    // producer and consumer threads and must stay where it was constructed.
+    SPSCRingBuffer(SPSCRingBuffer&&) = delete;
+    SPSCRingBuffer& operator=(SPSCRingBuffer&&) = delete;
 
     /// Write elements into the buffer (producer thread only).
     /// @param data Source data pointer.
