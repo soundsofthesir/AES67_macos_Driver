@@ -639,6 +639,7 @@ bool StreamManager::canAddStream(const SDPSession& sdp, std::string* errorOut) c
 }
 
 std::string StreamManager::getAddStreamError(const SDPSession& sdp) const {
+    std::lock_guard<std::mutex> lock(streamsMutex_);
     std::string error;
     canAddStream(sdp, &error);
     return error;
@@ -775,6 +776,10 @@ bool StreamManager::validateNetworkConfig(const SDPSession& sdp, std::string* er
         return false;
     }
 
+    if (!validateUniqueGroup(sdp, errorOut)) {
+        return false;
+    }
+
     // Check multicast routing configuration
     // Get primary ethernet interface for the check
     std::string primaryIface = NetworkUtils::getPrimaryEthernetInterface();
@@ -794,6 +799,46 @@ bool StreamManager::validateNetworkConfig(const SDPSession& sdp, std::string* er
         // Return true to allow stream addition with warning
     }
 
+    return true;
+}
+
+bool StreamManager::validateUniqueGroup(const SDPSession& sdp, std::string* errorOut) const {
+    // NOTE: Caller must hold streamsMutex_ lock
+
+    // Two receivers on one group:port mix the same audio twice; two senders
+    // to it garble it. A sender to a group a receiver here joins is allowed
+    // (the receiver may be on another interface) but can feed back.
+    const bool transmit = directionOf(sdp) == Direction::Transmit;
+    const std::string group = sdp.connectionAddress + ":" + std::to_string(sdp.port);
+    const auto clashes = [&](const SDPSession& other, bool otherTransmit, const std::string& name) {
+        if (other.connectionAddress != sdp.connectionAddress || other.port != sdp.port) return false;
+        if (otherTransmit != transmit) {
+            AES67_LOGF("WARNING: '%s' %s %s, which %s stream '%s' also uses; on one interface this host "
+                       "receives its own transmission",
+                       sdp.sessionName.c_str(), transmit ? "sends to" : "receives", group.c_str(),
+                       otherTransmit ? "TX" : "RX", name.c_str());
+            return false;
+        }
+        if (errorOut) {
+            *errorOut = "Multicast group " + group + " is already used by " + (transmit ? "TX" : "RX") +
+                        " stream '" + name + "'";
+        }
+        return true;
+    };
+
+    for (const auto& pair : streams_) {
+        if (clashes(pair.second.sdp, pair.second.isTransmit, pair.second.sdp.sessionName)) return false;
+    }
+
+    // Saved streams that aren't running. A failed copy of this stream is
+    // replaced by it, not a clash. While loading, entries earlier in the
+    // file are not checked: a disabled one must not stop an enabled one.
+    if (loadingSavedStreams_) return true;
+    for (const auto& kept : keptEntries_) {
+        if (!kept.entry.config || isFailedCopyOf(kept.entry, sdp)) continue;
+        const SDPSession& saved = kept.entry.config->sdp;
+        if (clashes(saved, directionOf(saved) == Direction::Transmit, saved.sessionName)) return false;
+    }
     return true;
 }
 
@@ -992,6 +1037,8 @@ bool StreamManager::loadSavedStreams() {
     // Load configurations from disk
     LoadedStreamConfig saved = configManager_->loadConfig();
     savedConfigFound_ = saved.status != LoadedStreamConfig::Status::Missing;
+    loadingSavedStreams_ = true;
+    UndoOnExit loaded([this] { loadingSavedStreams_ = false; });
     for (auto& kept : keptEntries_) {
         releaseKeptChannels(kept);
     }
