@@ -1588,6 +1588,54 @@ void testStreamsNotLoadedCanBeListedAndRemoved() {
     CHECK(readText(path).find("\"55103\"") != std::string::npos, "the unreadable entry is still kept");
 }
 
+// ---------------------------------------------------------------------------
+// #176: two streams in one direction on one group:port are refused; a TX to
+// an RX stream's group is allowed (with a warning). Saved streams that aren't
+// running count, but a disabled one never stops an enabled one loading.
+// ---------------------------------------------------------------------------
+void testDuplicateGroupIsRejected() {
+    std::cout << "#176: duplicate multicast group:port is rejected" << std::endl;
+    const std::string path = useEmptyConfig("dupgroup");
+    RxHarness harness;
+    TxRouting txRouting;
+    const TxContext txContext{harness.clock, txRouting};
+    {
+        StreamManager manager(harness.context(), txContext, testSap());
+        CHECK(!manager.addStream(makeRxSDP("239.69.99.80", 55110, 2), makeMapping(2, 0)).isNull(),
+              "the first RX stream should be added");
+        CHECK(manager.addStream(makeRxSDP("239.69.99.80", 55110, 2), makeMapping(2, 2)).isNull(),
+              "a second RX stream on the same group:port should be refused");
+        CHECK(!manager.addStream(makeRxSDP("239.69.99.80", 55112, 2), makeMapping(2, 4)).isNull(),
+              "an RX stream on the same group but another port should be added");
+
+        CHECK(!manager.createTxStream("TX A", "239.69.99.81", 55114, 2, makeMapping(2, 0), kHostOnly).isNull(),
+              "the first TX stream should be created");
+        CHECK(manager.createTxStream("TX B", "239.69.99.81", 55114, 2, makeMapping(2, 2), kHostOnly).isNull(),
+              "a second TX stream to the same group:port should be refused");
+        CHECK(!manager.createTxStream("TX C", "239.69.99.80", 55110, 2, makeMapping(2, 4), kHostOnly).isNull(),
+              "a TX stream to an RX stream's group:port should be allowed");
+        CHECK(manager.getStreamCount() == 4, "four streams should run (got " << manager.getStreamCount() << ")");
+        manager.removeAllStreams();
+    }
+
+    // A disabled saved stream holds its group:port against new streams, but
+    // not against an enabled one later in the file
+    SDPSession disabled = makeRxSDP("239.69.99.82", 55116, 2);
+    disabled.sessionName = "Disabled";
+    SDPSession enabled = makeRxSDP("239.69.99.82", 55116, 2);
+    enabled.sessionName = "Enabled";
+    SDPSession parked = makeRxSDP("239.69.99.83", 55118, 2);
+    parked.sessionName = "Parked";
+    writeStreamsFile(path, {savedEntry(disabled, makeMapping(2, 0), false), savedEntry(enabled, makeMapping(2, 2), true),
+                            savedEntry(parked, makeMapping(2, 4), false)});
+    StreamManager reloaded(harness.context(), txContext, testSap());
+    CHECK(reloaded.loadSavedStreams() && reloaded.getStreamCount() == 1,
+          "the enabled stream should load despite a disabled one on its group:port");
+    CHECK(reloaded.addStream(makeRxSDP("239.69.99.83", 55118, 2), makeMapping(2, 8)).isNull(),
+          "an RX stream on a disabled saved stream's group:port should be refused");
+    reloaded.removeAllStreams();
+}
+
 void testSavedStreamsHoldTheirChannels() {
     std::cout << "Saved streams that aren't running hold their channels" << std::endl;
     const std::string path = useEmptyConfig("reserve");
@@ -2553,6 +2601,7 @@ int main() {
     testDuplicateEntryIsSavedOnce();
     testStreamsNotLoadedCanBeListedAndRemoved();
     testSavedStreamsHoldTheirChannels();
+    testDuplicateGroupIsRejected();
     testMappingCoversTheWholeStream();
     testSavedMappingCoversTheWholeStream();
     testChannelMapIsIgnored();

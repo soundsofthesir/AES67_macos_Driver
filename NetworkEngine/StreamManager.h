@@ -168,7 +168,8 @@ public:
     // Validation
     //
 
-    // Check if stream can be added
+    // Check if stream can be added. Caller holds streamsMutex_ (it reads the
+    // running and saved streams); getAddStreamError() takes the lock itself.
     bool canAddStream(const SDPSession& sdp, std::string* errorOut = nullptr) const;
 
     // Get detailed error message for why stream can't be added
@@ -276,6 +277,7 @@ private:
     bool validateSampleRate(const SDPSession& sdp, std::string* errorOut) const;
     bool validateChannelAvailability(uint16_t numChannels, Direction direction, std::string* errorOut) const;
     bool validateNetworkConfig(const SDPSession& sdp, std::string* errorOut) const;
+    bool validateUniqueGroup(const SDPSession& sdp, std::string* errorOut) const;  // Caller must hold streamsMutex_
     bool streamsSupportSampleRate(double sampleRate) const;  // Caller must hold streamsMutex_
 
     // Stream creation helpers
@@ -345,6 +347,7 @@ private:
     bool autoSaveEnabled_{true};
     std::vector<KeptStream> keptEntries_;  // saved entries not loaded, in file order; guarded by streamsMutex_
     bool savedConfigFound_{false};        // guarded by streamsMutex_
+    bool loadingSavedStreams_{false};     // guarded by streamsMutex_
 
     // IO lifecycle state — true when Core Audio IO is active (StartIO/StopIO)
     std::atomic<bool> ioActive_{false};
