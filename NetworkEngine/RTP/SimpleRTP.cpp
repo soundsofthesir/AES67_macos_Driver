@@ -151,10 +151,17 @@ bool RTPSocket::openTransmitter(const char* multicastIP, uint16_t port, unsigned
         return false;
     }
 
-    // Set multicast TTL
-    if (setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
-        fprintf(stderr, "AES67 RTP openTransmitter: IP_MULTICAST_TTL failed for %s:%u (errno=%d: %s)\n",
-                multicastIP, port, errno, strerror(errno));
+    // Multicast and unicast sends take their TTL and interface from
+    // different options (#106)
+    in_addr destination{};
+    const bool isMulticast = inet_pton(AF_INET, multicastIP, &destination) == 1
+        && IN_MULTICAST(ntohl(destination.s_addr));
+    const int unicastTTL = ttl;
+    const int ttlResult = isMulticast ? setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))
+                                      : setsockopt(sockfd_, IPPROTO_IP, IP_TTL, &unicastTTL, sizeof(unicastTTL));
+    if (ttlResult < 0) {
+        fprintf(stderr, "AES67 RTP openTransmitter: setting TTL %u failed for %s:%u (errno=%d: %s)\n",
+                ttl, multicastIP, port, errno, strerror(errno));
         ::close(sockfd_);
         sockfd_ = -1;
         return false;
@@ -163,8 +170,9 @@ bool RTPSocket::openTransmitter(const char* multicastIP, uint16_t port, unsigned
     // Send on the interface by index (0 lets the routing table choose), so a
     // new address on the interface does not break sending
     if (interfaceIndex != 0) {
-        if (setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_IFINDEX, &interfaceIndex, sizeof(interfaceIndex)) < 0) {
-            fprintf(stderr, "AES67 RTP openTransmitter: IP_MULTICAST_IFINDEX %u failed for %s:%u (errno=%d: %s)\n",
+        const int option = isMulticast ? IP_MULTICAST_IFINDEX : IP_BOUND_IF;
+        if (setsockopt(sockfd_, IPPROTO_IP, option, &interfaceIndex, sizeof(interfaceIndex)) < 0) {
+            fprintf(stderr, "AES67 RTP openTransmitter: binding to interface %u failed for %s:%u (errno=%d: %s)\n",
                     interfaceIndex, multicastIP, port, errno, strerror(errno));
             ::close(sockfd_);
             sockfd_ = -1;

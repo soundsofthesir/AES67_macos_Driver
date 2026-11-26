@@ -41,6 +41,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <net/if.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
@@ -1676,6 +1677,68 @@ void testStreamAddressesAreParsed() {
     capture.close();
 }
 
+void testUnicastRxNeedsItsOwnPort() {
+    std::cout << "#106: a unicast RX stream needs a port no other RX stream uses" << std::endl;
+    useEmptyConfig("unicastport");
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    CHECK(!manager.addStream(makeRxSDP("239.69.99.90", 55140, 2), makeMapping(2, 0)).isNull(),
+          "a multicast RX stream should be added");
+    std::string error;
+    CHECK(!manager.canAddStream(makeRxSDP("127.0.0.1", 55140, 2), &error) &&
+              error.find("unicast RX stream needs a port") != std::string::npos,
+          "a unicast RX stream on a multicast RX stream's port should be refused (" << error << ")");
+    CHECK(!manager.addStream(makeRxSDP("127.0.0.1", 55142, 2), makeMapping(2, 2)).isNull(),
+          "a unicast RX stream on its own port should be added");
+    CHECK(manager.addStream(makeRxSDP("239.69.99.91", 55142, 2), makeMapping(2, 4)).isNull(),
+          "a multicast RX stream on a unicast RX stream's port should be refused");
+    CHECK(manager.addStream(makeRxSDP("10.0.0.9", 55142, 2), makeMapping(2, 4)).isNull(),
+          "a second unicast RX stream on that port should be refused");
+    CHECK(!manager.addStream(makeRxSDP("239.69.99.91", 55144, 2), makeMapping(2, 4)).isNull(),
+          "multicast RX streams on other ports are unaffected");
+    CHECK(!manager.createTxStream("Port TX", "127.0.0.1", 55142, 2, makeMapping(2, 0), kHostOnly).isNull(),
+          "a TX stream to the unicast RX port is allowed");
+    manager.removeAllStreams();
+}
+
+void testUnicastTxUsesItsTtlAndInterface() {
+    std::cout << "#106: unicast TX sets IP_TTL and IP_BOUND_IF, and is not announced" << std::endl;
+    const unsigned loopback = if_nametoindex("lo0");
+    RTP::RTPSocket sender;
+    CHECK(sender.openTransmitter("127.0.0.1", 55150, loopback, 5), "a unicast transmitter should open on lo0");
+    int ttl = -1;
+    unsigned boundTo = 0;
+    socklen_t length = sizeof(ttl);
+    getsockopt(sender.getFd(), IPPROTO_IP, IP_TTL, &ttl, &length);
+    length = sizeof(boundTo);
+    getsockopt(sender.getFd(), IPPROTO_IP, IP_BOUND_IF, &boundTo, &length);
+    CHECK(ttl == 5, "a unicast transmitter should use the configured TTL (got " << ttl << ")");
+    CHECK(loopback != 0 && boundTo == loopback, "and be bound to the configured interface (got " << boundTo << ")");
+    sender.close();
+
+    useEmptyConfig("unicastsap");
+    const std::string address = NetworkInterfaceDetection::resolveIPv4Address("");
+    if (address.empty()) {
+        std::cout << "  SAP check skipped: no network interface" << std::endl;
+        return;
+    }
+    SapCapture capture("239.255.255.255", kTestSapPort, address);
+    RxHarness harness;
+    TxRouting txRouting;
+    {
+        StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+        CHECK(!manager.createTxStream("SAP unicast", "127.0.0.1", 55152, 2, makeMapping(2, 0), kHostOnly).isNull(),
+              "a unicast TX stream should be created");
+        CHECK(!manager.createTxStream("SAP multicast", "239.69.99.92", 55154, 2, makeMapping(2, 2), kHostOnly).isNull(),
+              "a multicast TX stream should be created");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    const auto packets = capture.packets();
+    CHECK(!announcedSessions(packets, "SAP multicast").empty(), "the multicast TX stream should be announced");
+    CHECK(announcedSessions(packets, "SAP unicast").empty(), "the unicast TX stream should not be announced");
+}
+
 void testSavedStreamsHoldTheirChannels() {
     std::cout << "Saved streams that aren't running hold their channels" << std::endl;
     const std::string path = useEmptyConfig("reserve");
@@ -2643,6 +2706,8 @@ int main() {
     testSavedStreamsHoldTheirChannels();
     testDuplicateGroupIsRejected();
     testStreamAddressesAreParsed();
+    testUnicastRxNeedsItsOwnPort();
+    testUnicastTxUsesItsTtlAndInterface();
     testMappingCoversTheWholeStream();
     testSavedMappingCoversTheWholeStream();
     testChannelMapIsIgnored();
