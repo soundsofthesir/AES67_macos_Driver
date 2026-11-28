@@ -87,8 +87,13 @@ std::vector<std::string> SDPSession::getValidationErrors() const {
         errors.push_back("Port must be non-zero");
     }
 
-    if (encoding != "L16" && encoding != "L24" && encoding != "AM824") {
-        errors.push_back("Invalid encoding: " + encoding);
+    if (encoding != "L16" && encoding != "L24") {
+        errors.push_back("Unsupported encoding: " + encoding + " (must be L16 or L24)");
+    }
+
+    // The RTP header carries a 7-bit payload type; the dynamic range is 96-127
+    if (payloadType < 96 || payloadType > 127) {
+        errors.push_back("Payload type must be 96-127: " + std::to_string(payloadType));
     }
 
     if (sampleRate == 0) {
@@ -890,7 +895,7 @@ bool SDPParser::isValidSampleRate(uint32_t sampleRate) {
 }
 
 bool SDPParser::isValidEncoding(const std::string& encoding) {
-    return encoding == "L16" || encoding == "L24" || encoding == "AM824";
+    return encoding == "L16" || encoding == "L24";
 }
 
 } // namespace AES67

@@ -653,6 +653,22 @@ size_t StreamManager::getStreamCount() const {
 //
 
 bool StreamManager::canAddStream(const SDPSession& sdp, std::string* errorOut) const {
+    // Only what the RTP path implements (#117): AM824 is not, and the RTP
+    // header takes 7-bit payload types, of which 96-127 are dynamic
+    if (sdp.encoding != "L16" && sdp.encoding != "L24") {
+        if (errorOut) {
+            *errorOut = "Unsupported encoding: " + sdp.encoding + " (must be L16 or L24)";
+        }
+        return false;
+    }
+
+    if (sdp.payloadType < 96 || sdp.payloadType > 127) {
+        if (errorOut) {
+            *errorOut = "Payload type must be 96-127: " + std::to_string(sdp.payloadType);
+        }
+        return false;
+    }
+
     if (!validateSampleRate(sdp, errorOut)) {
         return false;
     }
