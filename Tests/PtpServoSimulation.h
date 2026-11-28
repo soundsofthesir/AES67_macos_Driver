@@ -75,8 +75,9 @@ public:
         : master_(master), network_(network), syncHz_(syncHz), rng_(seed) {}
 
     Servo servo;
+    double delayReqHz{1.0};
 
-    // Advance to `seconds`, exchanging Syncs at syncHz and a Delay_Req each second
+    // Advance to `seconds`, exchanging Syncs at syncHz and Delay_Reqs at delayReqHz
     void runUntil(double seconds) {
         const auto end = static_cast<uint64_t>(seconds * 1e9);
         const auto syncInterval = static_cast<uint64_t>(1e9 / syncHz_);
@@ -102,7 +103,7 @@ public:
                         master_.at(t3 + static_cast<uint64_t>(network_.delayNs + queueing(t3, false) + noise()));
                     servo.onDelay(t3, t4, 0.0);
                 }
-                nextDelayNs_ += 1000000000ULL;
+                nextDelayNs_ += static_cast<uint64_t>(1e9 / delayReqHz);
             }
             nowNs_ = next;
         }

@@ -50,7 +50,7 @@ The work for this step, in order:
 | Issue | Why |
 |---|---|
 | [#192](https://github.com/soundsofthesir/AES67_macos_Driver/issues/192) to [#195](https://github.com/soundsofthesir/AES67_macos_Driver/issues/195) | Filter the servo's measurements and smooth its output, so lock is steady and the path delay doesn't move between locks. |
-| [#138](https://github.com/soundsofthesir/AES67_macos_Driver/issues/138), [#145](https://github.com/soundsofthesir/AES67_macos_Driver/issues/145) | Small grandmaster time steps are missed, and long receive delays are mistaken for time steps. Either can leave the Mac locked at the wrong rate. |
+| [#145](https://github.com/soundsofthesir/AES67_macos_Driver/issues/145) | Receive delays over 10 ms are mistaken for time steps, which can leave the Mac locked at the wrong rate. |
 | [#103](https://github.com/soundsofthesir/AES67_macos_Driver/issues/103) | Starting audio or changing the sample rate moves sent audio off PTP time for a moment. |
 | [#110](https://github.com/soundsofthesir/AES67_macos_Driver/issues/110) | The PTP domain can fall back to 0 during holdover. |
 | [#197](https://github.com/soundsofthesir/AES67_macos_Driver/issues/197) | PTP drops every few minutes when the AES67 interface is shared with Internet Sharing. |

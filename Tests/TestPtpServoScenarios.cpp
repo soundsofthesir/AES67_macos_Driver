@@ -37,6 +37,9 @@ constexpr uint32_t kSeeds[] = {11, 12, 13};
 // A jump is confirmed by stepConfirmSamples Syncs, 0.375 s at 8 Sync/s: the
 // servo can't know sooner, so it may stay Locked on the old time that long
 constexpr double kConfirmSeconds = 0.5;
+// A jump down looks like queueing until a Delay_Req sent after it comes
+// back: up to one Delay_Req interval (1 s here) plus a Sync
+constexpr double kDownJumpSeconds = 1.125;
 
 struct Limits {
     uint32_t minRestarts{0};
@@ -166,13 +169,11 @@ Scenario jump(double stepMs) {
     return s;
 }
 
-// #138: jumps under 10 ms are fitted as ordinary Syncs. Today the servo
-// doesn't restart and stays Locked on a bent line for up to about 75 s
-Scenario smallJump(double stepMs) {
+// #138, #226: a small jump down is told apart from queueing by the next
+// Delay_Req, so it may stay Locked on the old time longer than a jump up
+Scenario smallDownJump(double stepMs) {
     Scenario s = jump(stepMs);
-    s.limits.minRestarts = 0;
-    s.limits.maxWrongWhileLockedSeconds = 90.0;
-    s.gap = KnownGap{"#138", followsJump()};
+    s.limits.maxWrongWhileLockedSeconds = kDownJumpSeconds;
     return s;
 }
 
@@ -234,7 +235,8 @@ std::vector<Scenario> scenarios() {
 
     all.push_back(jump(+20));
     all.push_back(jump(-20));
-    for (double ms : {+1.0, -1.0, +3.0, -3.0}) all.push_back(smallJump(ms));
+    for (double ms : {+1.0, +3.0}) all.push_back(jump(ms));
+    for (double ms : {-1.0, -3.0}) all.push_back(smallDownJump(ms));
 
     {
         Scenario s;
