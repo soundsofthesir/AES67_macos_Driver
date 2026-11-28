@@ -59,11 +59,17 @@ public:
         double holdGoodFraction{0.125};
         double stepThresholdNs{10e6};    // a Sync this far off is a step candidate
         // Queueing only delays a Sync, so a Sync this far above the line can't be
-        // queueing: a step candidate on its own. For a step down, Sync errors
-        // must show a bias and reciprocal Delay_Req residuals must fall below
-        // their pre-bias lower envelope; receive queueing moves those residuals up.
+        // queueing: a step candidate on its own
         double positiveStepThresholdNs{0.5e6};
-        size_t stepBiasSamples{8};       // recent Syncs whose median error decides a bias
+        // A step down is suspected when this many Syncs in a row are this far
+        // below the line, and confirmed when a Delay_Req sent after them lands
+        // below every earlier one: queueing only ever moves Delay_Reqs up
+        size_t downStepSamples{3};
+        double downStepThresholdNs{0.5e6};
+        size_t downStepBaselineDelays{16};  // earlier Delay_Reqs needed for that comparison
+        // Recent Syncs with a median this far below the line mean receive
+        // queueing; after it, Syncs above the line may be the line catching up
+        size_t stepBiasSamples{8};
         double negativeStepBiasNs{1e6};
         size_t stepConfirmSamples{3};    // consecutive agreeing candidates confirm a step
         double maxRejectedFraction{0.25};
@@ -128,6 +134,16 @@ private:
         double slope;
         double intercept;
     };
+    struct RecentSync {
+        Sample sample;
+        double error;       // against the line before it
+        LineSnapshot line;  // the line before it
+    };
+    struct DownStep {
+        LineSnapshot line;      // fitted before the first Sync below it
+        uint64_t cutoffHostNs;  // the last Sync on the line: Delay_Reqs sent before are the baseline
+        std::optional<double> baselineMinNs;
+    };
 
     void startTimeline();
     void addSample(const Sample& sample);
@@ -135,8 +151,10 @@ private:
     double envelopeOffsetAt(uint64_t hostNs) const;  // E(h) - p0, in ns
     void updatePathDelay();
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
-    bool negativeBias() const;  // the median of recent errors is well below the line
-    bool negativeDelayStepEvidence() const;  // Delay_Req residuals also moved down, ruling out Sync queueing
+    bool congested() const;  // the median of recent errors is well below the line
+    void trackDownStep();
+    bool downStepEvidence() const;  // a Delay_Req moved down too, ruling out Sync queueing
+    static double delayResidual(const LineSnapshot& line, const DelayPair& delay);
     void judgeLock();
 
     const Config config_;
@@ -144,12 +162,9 @@ private:
     std::deque<Sample> samples_;
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
-    std::deque<double> recentErrors_;      // error of each recent Sync against the line, newest last
-    std::deque<LineSnapshot> recentErrorLines_;  // fitted line before each corresponding Sync
-    std::optional<LineSnapshot> negativeStepBaselineLine_;
-    std::optional<double> negativeStepBaselineDelayMinNs_;
-    size_t negativeRecoveryCooldown_{0};
-    bool congestionRecoveryPending_{false};
+    std::deque<RecentSync> recent_;        // newest last
+    std::optional<DownStep> downStep_;     // while a step down is suspected
+    size_t congestionRecoveryCooldown_{0};  // Syncs on the line still needed after queueing
     std::deque<bool> rejected_;            // per Sync received
     std::vector<Sample> stepCandidates_;
 

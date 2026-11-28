@@ -147,11 +147,9 @@ void testSmallGrandmasterStepIsFollowed() {
     constexpr double syncInterval = 1.0 / syncHz;
     const Servo::Config config{};
     // Positive steps need three agreeing Syncs (0.375 s at 8 Hz). A negative
-    // step first needs a negative bias window, which can take up to
-    // stepBiasSamples Syncs, then three agreeing candidates. Keep that 4-to-8
-    // Sync recognition delay explicit: (8 + 3) * 125 ms = 1.375 s worst case.
-    const double negativeStepLimit =
-        static_cast<double>(config.stepBiasSamples + config.stepConfirmSamples) * syncInterval;
+    // step also needs a Delay_Req sent after it (one a second here), then
+    // three agreeing Syncs: 1 s + 3 * 125 ms = 1.375 s worst case
+    const double negativeStepLimit = 1.0 + static_cast<double>(config.stepConfirmSamples) * syncInterval;
     for (const int64_t stepNs : {1000000LL, -1000000LL, 3000000LL, -3000000LL, 5000000LL, -5000000LL}) {
         Simulation sim(Master{}, Network{}, syncHz, 8);
         sim.runUntil(60);
@@ -191,6 +189,46 @@ void testSmallGrandmasterStepIsFollowed() {
         CHECK(lockedWhileWrong == 0,
               "a " << stepNs / 1000000 << " ms step: locked while the phase was off by over 100 us at "
                    << lockedWhileWrong << " points after the reset bound");
+    }
+}
+
+// #226: a jump down can't be told from queueing until a Delay_Req sent
+// after it comes back. Lock must drop by then, wherever the jump falls
+// between Delay_Reqs and however often they are sent
+void testDownStepDropsLockByNextDelayReq() {
+    std::cout << "A small jump down drops lock by the first Delay_Req sent after it" << std::endl;
+    constexpr double syncHz = 8.0;
+    constexpr double syncInterval = 1.0 / syncHz;
+    constexpr double dt = 1.0 / 64;
+    const Servo::Config config{};
+    for (const double delayReqHz : {1.0, 16.0}) {
+        // The Sync side needs three Syncs under the line whatever the Delay_Req rate
+        const double limit = std::max(1.0 / delayReqHz, static_cast<double>(config.stepConfirmSamples) * syncInterval) +
+                             syncInterval;
+        for (const double stepAt : {60.49, 60.51}) {
+            for (const int64_t stepNs : {-1000000LL, -3000000LL}) {
+                Simulation sim(Master{}, Network{}, syncHz, 5);
+                sim.delayReqHz = delayReqHz;
+                sim.runUntil(stepAt);
+                const uint32_t before = sim.measure().generation;
+                sim.master().stepNs = stepNs;
+                double wrongWhileLocked = 0.0;
+                for (double t = stepAt + dt; t <= stepAt + 5.0; t += dt) {
+                    sim.runUntil(t);
+                    const Run r = sim.measure();
+                    if (r.state == Servo::State::Locked && std::fabs(r.phaseErrorNs) > config.lockThresholdNs) {
+                        wrongWhileLocked += dt;
+                    }
+                }
+                const Run r = sim.measure();
+                CHECK(r.generation == before + 1,
+                      stepNs / 1000000 << " ms at " << stepAt << " s, " << delayReqHz
+                                       << " Delay_Req/s: one new timeline (generation " << r.generation << ")");
+                CHECK(wrongWhileLocked <= limit,
+                      stepNs / 1000000 << " ms at " << stepAt << " s, " << delayReqHz << " Delay_Req/s: Locked on the old time for "
+                                       << wrongWhileLocked << " s, limit " << limit << " s");
+            }
+        }
     }
 }
 
@@ -466,6 +504,7 @@ int main() {
     testStaysLockedThroughBursts();
     testGrandmasterTimeStep();
     testSmallGrandmasterStepIsFollowed();
+    testDownStepDropsLockByNextDelayReq();
     testIsolatedPositiveExcursionIsNotAStep();
     testSustainedQueueBurstsAreNotSteps();
     testQueueRecoveryAfterStartupBurstIsNotAStep();
