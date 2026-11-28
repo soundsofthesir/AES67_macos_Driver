@@ -35,10 +35,10 @@ namespace Ptp {
 /// "how many are good" is the test, not "is the best one good". Acquiring
 /// lock also needs the last few estimates to agree with the current one: a
 /// young line can predict well enough while it is still being corrected.
-/// Holding lock is judged more leniently than acquiring it. A jump in the master's time
-/// (a new grandmaster epoch) is confirmed by consecutive agreeing Syncs, then
-/// starts a new timeline (generation). A line further from the host clock's
-/// rate than any real clock could be never locks.
+/// Holding lock is judged more leniently than acquiring it. A jump in the
+/// master's time (a new grandmaster epoch) is confirmed by consecutive
+/// agreeing Syncs, then starts a new timeline (generation). A line further
+/// from the host clock's rate than any real clock could be never locks.
 ///
 /// Holdover keeps a locked line when the master goes (its Announces time
 /// out) or its Syncs stop; an unlocked line is never held over. Holdover
