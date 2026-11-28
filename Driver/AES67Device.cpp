@@ -28,6 +28,7 @@ AES67Device::AES67Device(std::shared_ptr<aspl::Context> context)
         .CanBeDefault = true,
         .CanBeDefaultForSystemSounds = false,
         .SampleRate = kDefaultSampleRate,
+        .ChannelCount = kNumChannels,
         .ZeroTimeStampPeriod = kZeroTimeStampPeriod,
         .ClockIsStable = true,
         .ClockAlgorithm = kAudioDeviceClockAlgorithmRaw
