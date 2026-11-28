@@ -461,6 +461,12 @@ target_include_directories(TestPtpClockControl PRIVATE
 
 target_compile_features(TestPtpClockControl PRIVATE cxx_std_17)
 
+add_executable(TestDeviceChannelCount
+    TestDeviceChannelCount.cpp
+)
+
+target_compile_features(TestDeviceChannelCount PRIVATE cxx_std_17)
+
 add_executable(TestPtpSettings
     TestPtpSettings.cpp
     ../NetworkEngine/PTP/PtpSettings.cpp
@@ -536,6 +542,7 @@ add_test(NAME PtpClockControl COMMAND TestPtpClockControl)
 add_test(NAME PtpSettings COMMAND TestPtpSettings)
 add_test(NAME PtpClockSource COMMAND TestPtpClockSource)
 add_test(NAME TxMediaClock COMMAND TestTxMediaClock)
+add_test(NAME DeviceChannelCount COMMAND TestDeviceChannelCount)
 
 # The driver bundle must carry a valid signature over its resources: Core
 # Audio loads plug-ins from /Library/Audio/Plug-Ins/HAL, and the linker's

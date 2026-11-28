@@ -81,6 +81,8 @@ run TestPtpServo        Tests/TestPtpServo.cpp NetworkEngine/PTP/PtpServo.cpp
 # TestPtpServoScenarios has its own CI job (ci.yml, servo-scenarios)
 run TestPtpClockControl Tests/TestPtpClockControl.cpp NetworkEngine/Clock/PtpClockControl.cpp NetworkEngine/PTP/PtpServo.cpp
 run TestPtpSettings     Tests/TestPtpSettings.cpp NetworkEngine/PTP/PtpSettings.cpp
+# Source-level check of the device's channel count (libASPL isn't available here)
+run TestDeviceChannelCount Tests/TestDeviceChannelCount.cpp
 
 # Shell tests that stand in for every system command they would change
 echo "::group::Installer configure-driver"
