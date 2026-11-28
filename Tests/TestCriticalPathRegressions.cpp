@@ -41,6 +41,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <net/if.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
@@ -1636,6 +1637,108 @@ void testDuplicateGroupIsRejected() {
     reloaded.removeAllStreams();
 }
 
+void testStreamAddressesAreParsed() {
+    std::cout << "#106: any multicast group or unicast address is accepted, malformed ones refused" << std::endl;
+    const std::string configPath = useEmptyConfig("addresses");
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    for (const char* good : {"239.69.1.1", "224.0.1.129", "232.1.2.3", "192.168.1.20", "10.0.0.9", "127.0.0.1"}) {
+        std::string error;
+        CHECK(manager.canAddStream(makeRxSDP(good, 55130, 2), &error), good << " should be accepted (" << error << ")");
+    }
+    for (const char* bad : {"239.1.1.300", "239.1", "239.1.1.1.1", "239.1.1.1 ", "0x7f.0.0.1", "abc", "0.0.0.0",
+                            "255.255.255.255", "240.0.0.1", "::1"}) {
+        std::string error;
+        CHECK(!manager.canAddStream(makeRxSDP(bad, 55130, 2), &error), "'" << bad << "' should be refused");
+        CHECK(error.find("Invalid IP address") != std::string::npos, "with an error naming the address (" << error << ")");
+    }
+
+    // A unicast stream needs no group join: a TX stream to this host reaches a unicast receiver
+    RTP::RTPSocket capture;
+    CHECK(capture.openReceiver("127.0.0.1", 55132), "a unicast receive socket should open");
+    const StreamID tx = manager.createTxStream("Unicast TX", "127.0.0.1", 55132, 2, makeMapping(2, 0), kHostOnly);
+    CHECK(!tx.isNull(), "a unicast TX stream should be created");
+    std::vector<uint8_t> buffer(2048);
+    size_t received = 0;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (received == 0 && std::chrono::steady_clock::now() < until) {
+        RTP::RTPPacket packet;
+        if (capture.receive(packet, buffer.data(), buffer.size()) > 0) ++received;
+    }
+    CHECK(received > 0, "packets sent to 127.0.0.1 should arrive on the unicast socket");
+    const std::string sdpPath = configPath + ".unicast.sdp";
+    CHECK(manager.exportSDPFile(tx, sdpPath), "the unicast stream's SDP should export");
+    std::ifstream sdpFile(sdpPath);
+    const std::string sdp((std::istreambuf_iterator<char>(sdpFile)), std::istreambuf_iterator<char>());
+    CHECK(sdp.find("c=IN IP4 127.0.0.1\r\n") != std::string::npos, "a unicast c= line has no /ttl (" << sdp << ")");
+    std::remove(sdpPath.c_str());
+    manager.removeAllStreams();
+    capture.close();
+}
+
+void testUnicastRxNeedsItsOwnPort() {
+    std::cout << "#106: a unicast RX stream needs a port no other RX stream uses" << std::endl;
+    useEmptyConfig("unicastport");
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+    CHECK(!manager.addStream(makeRxSDP("239.69.99.90", 55140, 2), makeMapping(2, 0)).isNull(),
+          "a multicast RX stream should be added");
+    std::string error;
+    CHECK(!manager.canAddStream(makeRxSDP("127.0.0.1", 55140, 2), &error) &&
+              error.find("unicast RX stream needs a port") != std::string::npos,
+          "a unicast RX stream on a multicast RX stream's port should be refused (" << error << ")");
+    CHECK(!manager.addStream(makeRxSDP("127.0.0.1", 55142, 2), makeMapping(2, 2)).isNull(),
+          "a unicast RX stream on its own port should be added");
+    CHECK(manager.addStream(makeRxSDP("239.69.99.91", 55142, 2), makeMapping(2, 4)).isNull(),
+          "a multicast RX stream on a unicast RX stream's port should be refused");
+    CHECK(manager.addStream(makeRxSDP("10.0.0.9", 55142, 2), makeMapping(2, 4)).isNull(),
+          "a second unicast RX stream on that port should be refused");
+    CHECK(!manager.addStream(makeRxSDP("239.69.99.91", 55144, 2), makeMapping(2, 4)).isNull(),
+          "multicast RX streams on other ports are unaffected");
+    CHECK(!manager.createTxStream("Port TX", "127.0.0.1", 55142, 2, makeMapping(2, 0), kHostOnly).isNull(),
+          "a TX stream to the unicast RX port is allowed");
+    manager.removeAllStreams();
+}
+
+void testUnicastTxUsesItsTtlAndInterface() {
+    std::cout << "#106: unicast TX sets IP_TTL and IP_BOUND_IF, and is not announced" << std::endl;
+    const unsigned loopback = if_nametoindex("lo0");
+    RTP::RTPSocket sender;
+    CHECK(sender.openTransmitter("127.0.0.1", 55150, loopback, 5), "a unicast transmitter should open on lo0");
+    int ttl = -1;
+    unsigned boundTo = 0;
+    socklen_t length = sizeof(ttl);
+    getsockopt(sender.getFd(), IPPROTO_IP, IP_TTL, &ttl, &length);
+    length = sizeof(boundTo);
+    getsockopt(sender.getFd(), IPPROTO_IP, IP_BOUND_IF, &boundTo, &length);
+    CHECK(ttl == 5, "a unicast transmitter should use the configured TTL (got " << ttl << ")");
+    CHECK(loopback != 0 && boundTo == loopback, "and be bound to the configured interface (got " << boundTo << ")");
+    sender.close();
+
+    useEmptyConfig("unicastsap");
+    const std::string address = NetworkInterfaceDetection::resolveIPv4Address("");
+    if (address.empty()) {
+        std::cout << "  SAP check skipped: no network interface" << std::endl;
+        return;
+    }
+    SapCapture capture("239.255.255.255", kTestSapPort, address);
+    RxHarness harness;
+    TxRouting txRouting;
+    {
+        StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+        CHECK(!manager.createTxStream("SAP unicast", "127.0.0.1", 55152, 2, makeMapping(2, 0), kHostOnly).isNull(),
+              "a unicast TX stream should be created");
+        CHECK(!manager.createTxStream("SAP multicast", "239.69.99.92", 55154, 2, makeMapping(2, 2), kHostOnly).isNull(),
+              "a multicast TX stream should be created");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    const auto packets = capture.packets();
+    CHECK(!announcedSessions(packets, "SAP multicast").empty(), "the multicast TX stream should be announced");
+    CHECK(announcedSessions(packets, "SAP unicast").empty(), "the unicast TX stream should not be announced");
+}
+
 void testSavedStreamsHoldTheirChannels() {
     std::cout << "Saved streams that aren't running hold their channels" << std::endl;
     const std::string path = useEmptyConfig("reserve");
@@ -2602,6 +2705,9 @@ int main() {
     testStreamsNotLoadedCanBeListedAndRemoved();
     testSavedStreamsHoldTheirChannels();
     testDuplicateGroupIsRejected();
+    testStreamAddressesAreParsed();
+    testUnicastRxNeedsItsOwnPort();
+    testUnicastTxUsesItsTtlAndInterface();
     testMappingCoversTheWholeStream();
     testSavedMappingCoversTheWholeStream();
     testChannelMapIsIgnored();

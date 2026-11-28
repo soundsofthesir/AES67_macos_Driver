@@ -78,8 +78,13 @@ bool RTPSocket::openReceiver(const char* multicastIP, uint16_t port, unsigned in
     // on the interface (DHCP renewal, Wi-Fi roam) leaves the membership
     // intact. Index 0 means "let the routing table choose", which only the
     // address-based join supports (MCAST_JOIN_GROUP needs a real index).
-    bool joined = false;
-    if (interfaceIndex != 0) {
+    // A unicast stream needs no join: the socket bound to INADDR_ANY above
+    // already receives it (#106)
+    in_addr groupAddress{};
+    const bool isMulticast = inet_pton(AF_INET, multicastIP, &groupAddress) == 1
+        && IN_MULTICAST(ntohl(groupAddress.s_addr));
+    bool joined = !isMulticast;
+    if (isMulticast && interfaceIndex != 0) {
         struct group_req join {};
         join.gr_interface = interfaceIndex;
         auto* group = reinterpret_cast<struct sockaddr_in*>(&join.gr_group);
@@ -87,7 +92,7 @@ bool RTPSocket::openReceiver(const char* multicastIP, uint16_t port, unsigned in
         group->sin_len = sizeof(struct sockaddr_in);
         group->sin_addr.s_addr = inet_addr(multicastIP);
         joined = setsockopt(sockfd_, IPPROTO_IP, MCAST_JOIN_GROUP, &join, sizeof(join)) == 0;
-    } else {
+    } else if (isMulticast) {
         struct ip_mreq mreq {};
         mreq.imr_multiaddr.s_addr = inet_addr(multicastIP);
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
@@ -146,10 +151,17 @@ bool RTPSocket::openTransmitter(const char* multicastIP, uint16_t port, unsigned
         return false;
     }
 
-    // Set multicast TTL
-    if (setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
-        fprintf(stderr, "AES67 RTP openTransmitter: IP_MULTICAST_TTL failed for %s:%u (errno=%d: %s)\n",
-                multicastIP, port, errno, strerror(errno));
+    // Multicast and unicast sends take their TTL and interface from
+    // different options (#106)
+    in_addr destination{};
+    const bool isMulticast = inet_pton(AF_INET, multicastIP, &destination) == 1
+        && IN_MULTICAST(ntohl(destination.s_addr));
+    const int unicastTTL = ttl;
+    const int ttlResult = isMulticast ? setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))
+                                      : setsockopt(sockfd_, IPPROTO_IP, IP_TTL, &unicastTTL, sizeof(unicastTTL));
+    if (ttlResult < 0) {
+        fprintf(stderr, "AES67 RTP openTransmitter: setting TTL %u failed for %s:%u (errno=%d: %s)\n",
+                ttl, multicastIP, port, errno, strerror(errno));
         ::close(sockfd_);
         sockfd_ = -1;
         return false;
@@ -158,8 +170,9 @@ bool RTPSocket::openTransmitter(const char* multicastIP, uint16_t port, unsigned
     // Send on the interface by index (0 lets the routing table choose), so a
     // new address on the interface does not break sending
     if (interfaceIndex != 0) {
-        if (setsockopt(sockfd_, IPPROTO_IP, IP_MULTICAST_IFINDEX, &interfaceIndex, sizeof(interfaceIndex)) < 0) {
-            fprintf(stderr, "AES67 RTP openTransmitter: IP_MULTICAST_IFINDEX %u failed for %s:%u (errno=%d: %s)\n",
+        const int option = isMulticast ? IP_MULTICAST_IFINDEX : IP_BOUND_IF;
+        if (setsockopt(sockfd_, IPPROTO_IP, option, &interfaceIndex, sizeof(interfaceIndex)) < 0) {
+            fprintf(stderr, "AES67 RTP openTransmitter: binding to interface %u failed for %s:%u (errno=%d: %s)\n",
                     interfaceIndex, multicastIP, port, errno, strerror(errno));
             ::close(sockfd_);
             sockfd_ = -1;
@@ -304,7 +317,7 @@ void RTPSocket::close() {
     if (sockfd_ >= 0) {
         // Leave multicast group if receiver
         // Use the same interface address that was used for IP_ADD_MEMBERSHIP
-        if (isReceiver_) {
+        if (isReceiver_ && IN_MULTICAST(ntohl(multicastAddr_.sin_addr.s_addr))) {
             int left = 0;
             if (joinedInterfaceIndex_ != 0) {
                 struct group_req leave {};

@@ -14,10 +14,47 @@
 #include <sstream>
 #include <thread>
 #include <ctime>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 namespace AES67 {
 
 namespace {
+
+/// The stream address as an IPv4 address in host order, if it is a whole
+/// dotted-quad address. inet_pton refuses "239.1" and "239.1.1.300", which
+/// inet_addr would turn into 239.0.0.1 and INADDR_NONE (#106).
+std::optional<uint32_t> parseStreamAddress(const std::string& text) {
+    in_addr address{};
+    if (inet_pton(AF_INET, text.c_str(), &address) != 1) {
+        return std::nullopt;
+    }
+    return ntohl(address.s_addr);
+}
+
+/// A unicast address a stream can use: not 0.0.0.0/8, and not the reserved
+/// 240.0.0.0/4 block, which includes the broadcast address
+bool isUnicastHostAddress(uint32_t address) {
+    return (address >> 24) != 0 && !IN_MULTICAST(address) && !IN_EXPERIMENTAL(address);
+}
+
+bool isUnicastStream(const SDPSession& sdp) {
+    const auto address = parseStreamAddress(sdp.connectionAddress);
+    return address && !IN_MULTICAST(*address);
+}
+
+/// Dante receivers only subscribe to AES67 multicast inside the prefix in
+/// their AES67 settings (default 239.69.0.0/16). Outside it a stream is
+/// listed in Dante Controller but never subscribes (seen with a Behringer
+/// WING); other AES67 receivers have no such limit, so warn, don't refuse.
+void warnIfOutsideDanteRange(const SDPSession& sdp) {
+    const auto address = parseStreamAddress(sdp.connectionAddress);
+    if (address && IN_MULTICAST(*address) && (*address >> 16) != 0xEF45) {
+        AES67_LOGF("StreamManager: %s is outside 239.69.0.0/16; Dante receivers with the default "
+                   "AES67 prefix will list '%s' but not subscribe to it",
+                   sdp.connectionAddress.c_str(), sdp.sessionName.c_str());
+    }
+}
 
 /// A string member of a member of an entry's raw JSON ("" if absent or not a string).
 std::string rawText(const JsonValue& raw, const char* object, const char* key) {
@@ -394,14 +431,7 @@ StreamID StreamManager::createTxStream(
     sdp.ttl = options.ttl;
     sdp.framecount = framesPerPacket(sdp);
 
-    // Dante receivers only subscribe to AES67 multicast inside the prefix in
-    // their AES67 settings (default 239.69.0.0/16). Outside it a stream is
-    // listed in Dante Controller but never subscribes (seen with a Behringer
-    // WING); other AES67 receivers have no such limit, so warn, don't refuse.
-    if (multicastIP.rfind("239.69.", 0) != 0) {
-        AES67_LOGF("StreamManager::createTxStream: %s is outside 239.69.0.0/16; Dante receivers with the default "
-                   "AES67 prefix will list '%s' but not subscribe to it", multicastIP.c_str(), name.c_str());
-    }
+    warnIfOutsideDanteRange(sdp);
 
     // As in addStream: a failed saved copy lends its channels until this succeeds
     releaseKeptCopiesOf(sdp);
@@ -755,16 +785,26 @@ bool StreamManager::validateChannelAvailability(uint16_t numChannels, Direction 
 bool StreamManager::validateNetworkConfig(const SDPSession& sdp, std::string* errorOut) const {
     if (sdp.connectionAddress.empty()) {
         if (errorOut) {
-            *errorOut = "Missing multicast IP address";
+            *errorOut = "Missing stream IP address";
         }
         return false;
     }
 
-    // Check for valid multicast range (239.x.x.x for AES67)
-    if (sdp.connectionAddress.substr(0, 4) != "239.") {
+    // Any IPv4 multicast group (224.0.0.0/4, including SSM 232/8) or a
+    // unicast host address. IPv6 is not supported.
+    const auto address = parseStreamAddress(sdp.connectionAddress);
+    if (!address) {
         if (errorOut) {
-            *errorOut = "Invalid multicast IP: " + sdp.connectionAddress +
-                       " (AES67 requires 239.x.x.x)";
+            *errorOut = "Invalid IP address: " + sdp.connectionAddress +
+                       " (expected a dotted IPv4 address such as 239.69.1.1)";
+        }
+        return false;
+    }
+    const bool isMulticast = IN_MULTICAST(*address);
+    if (!isMulticast && !isUnicastHostAddress(*address)) {
+        if (errorOut) {
+            *errorOut = "Invalid IP address: " + sdp.connectionAddress +
+                       " (expected an IPv4 multicast group or a unicast host address)";
         }
         return false;
     }
@@ -784,7 +824,7 @@ bool StreamManager::validateNetworkConfig(const SDPSession& sdp, std::string* er
     // Get primary ethernet interface for the check
     std::string primaryIface = NetworkUtils::getPrimaryEthernetInterface();
 
-    if (!NetworkUtils::hasMulticastRoute(primaryIface)) {
+    if (isMulticast && !NetworkUtils::hasMulticastRoute(primaryIface)) {
         if (errorOut) {
             std::string iface = primaryIface.empty() ? "en0" : primaryIface;
             *errorOut = "WARNING: Multicast routing not configured. Audio may not flow.\n"
@@ -811,6 +851,17 @@ bool StreamManager::validateUniqueGroup(const SDPSession& sdp, std::string* erro
     const bool transmit = directionOf(sdp) == Direction::Transmit;
     const std::string group = sdp.connectionAddress + ":" + std::to_string(sdp.port);
     const auto clashes = [&](const SDPSession& other, bool otherTransmit, const std::string& name) {
+        // macOS hands a unicast datagram on a port shared with SO_REUSEPORT
+        // to the first socket bound to it, so a unicast receiver needs a port
+        // no other receiver here uses (#106)
+        if (!transmit && !otherTransmit && other.port == sdp.port &&
+            (isUnicastStream(sdp) || isUnicastStream(other))) {
+            if (errorOut) {
+                *errorOut = "Port " + std::to_string(sdp.port) + " is already used by RX stream '" + name +
+                            "'; a unicast RX stream needs a port no other RX stream uses";
+            }
+            return true;
+        }
         if (other.connectionAddress != sdp.connectionAddress || other.port != sdp.port) return false;
         if (otherTransmit != transmit) {
             AES67_LOGF("WARNING: '%s' %s %s, which %s stream '%s' also uses; on one interface this host "
@@ -860,6 +911,10 @@ std::unique_ptr<RTPReceiver> StreamManager::createReceiver(
 }
 
 void StreamManager::announceTx(const StreamID& id, const ManagedStream& managed) {
+    // SAP announces multicast sessions; a unicast stream goes to one receiver
+    if (isUnicastStream(managed.sdp)) {
+        return;
+    }
     const std::string address = NetworkInterfaceDetection::resolveIPv4Address(managed.networkInterface);
     if (address.empty()) {
         AES67_LOGF("StreamManager: no IPv4 address for interface '%s'; '%s' is not announced",
@@ -1202,6 +1257,10 @@ bool StreamManager::loadSavedStream(const PersistedStreamConfig& config) {
         AES67_LOGF("StreamManager: Cannot add stream '%s': %s",
                   config.sdp.sessionName.c_str(), error.c_str());
         return false;
+    }
+
+    if (directionOf(config.sdp) == Direction::Transmit) {
+        warnIfOutsideDanteRange(config.sdp);
     }
 
     // Use the StreamID from the saved mapping

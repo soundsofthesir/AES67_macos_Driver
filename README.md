@@ -49,7 +49,8 @@ Next up is more hardware testing (Dante, RAVENNA, longer runs, more channels), t
 - Without PTP the driver follows one sender's clock, and a second sender on a different clock drifts and occasionally resyncs. With PTP the same goes for any sender that isn't on the grandmaster ([#43](https://github.com/soundsofthesir/AES67_macos_Driver/issues/43)).
 - Received packets that arrive more than 8 ms late play as silence. So do packets that arrive on time but that the receive thread writes after Core Audio has read past them, which happens when the thread is held off the CPU. The driver counts these per stream but doesn't report the count anywhere yet.
 - The Manager app doesn't control the driver yet.
-- Dante's default AES67 multicast range is 239.69.x.x. The driver logs a warning for send streams outside it.
+- Stream addresses are IPv4 only: any multicast group (224.0.0.0/4) or a unicast host address. IPv6 isn't supported. A unicast receive stream needs a port no other receive stream uses, and unicast send streams aren't announced over SAP.
+- Dante's default AES67 multicast range is 239.69.x.x. The driver logs a warning for multicast send streams outside it, including ones loaded from `streams.json`.
 - If you set a stream's interface as an IP address, it breaks when the address changes. Use the interface name (e.g. `en0`). A send stream on a named interface announces its current address as the source, so receivers that filter on source keep playing it after the address changes. A send stream with no interface announces no source filter.
 - Some apps can't open a 128-channel device. ffmpeg's AVFoundation input fails on it, because its resampler stops at 64 channels.
 
