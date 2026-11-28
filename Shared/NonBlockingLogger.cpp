@@ -1,4 +1,5 @@
 #include "NonBlockingLogger.h"
+#include "PortableUtil.h"
 #include <chrono>
 #include <iomanip>
 #include <ctime>
@@ -12,12 +13,20 @@ NonBlockingLogger::LogEntry::LogEntry(LogLevel l, const std::string& msg)
     : level(l), message(msg) {
     // Create timestamp
     auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
+    // (not named time_t: that would shadow the type)
+    const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()) % 1000;
     
+    // std::localtime returns a shared static std::tm that concurrent callers
+    // overwrite; convert into a buffer owned by this call instead
+    std::tm localTm{};
     std::ostringstream oss;
-    oss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+    if (aes67::util::safeLocalTime(nowTime, localTm)) {
+        oss << std::put_time(&localTm, "%Y-%m-%d %H:%M:%S");
+    } else {
+        oss << "0000-00-00 00:00:00";
+    }
     oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
     timestamp = oss.str();
 }

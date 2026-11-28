@@ -5,6 +5,9 @@
 //
 
 #include "Types.h"
+#include "PortableUtil.h"
+#include <algorithm>
+#include <array>
 #include <random>
 #include <sstream>
 #include <iomanip>
@@ -91,11 +94,12 @@ StreamID StreamID::null() {
 StreamID StreamID::generate() {
     std::random_device rd;
     std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint8_t> dis(0, 255);
 
     uint8_t uuid[16];
     for (int i = 0; i < 16; i++) {
-        uuid[i] = dis(gen);
+        // uniform_int_distribution<uint8_t> is undefined behaviour (char types
+        // are not permitted IntTypes), so draw an unsigned and narrow it
+        uuid[i] = aes67::util::randomByte(gen);
     }
 
     // Set version (4) and variant bits for UUID v4

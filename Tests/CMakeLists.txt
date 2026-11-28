@@ -46,6 +46,19 @@ target_include_directories(TestRingBuffer PRIVATE
 
 target_compile_features(TestRingBuffer PRIVATE cxx_std_17)
 
+# Test: regression tests for the undefined-behaviour fixes (#124)
+add_executable(TestUBFixes
+    TestUBFixes.cpp
+    ../Shared/Types.cpp
+    ../Shared/NonBlockingLogger.cpp
+)
+
+target_include_directories(TestUBFixes PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestUBFixes PRIVATE cxx_std_17)
+
 # Test: RTP Receiver
 add_executable(TestRTPReceiver
     TestRTPReceiver.cpp
@@ -510,6 +523,7 @@ add_test(NAME HalExceptions COMMAND TestHalExceptions)
 add_test(NAME SDPParser COMMAND TestSDPParser)
 add_test(NAME ChannelMapper COMMAND TestChannelMapper)
 add_test(NAME RingBuffer COMMAND TestRingBuffer)
+add_test(NAME UBFixes COMMAND TestUBFixes)
 add_test(NAME RTPReceiver COMMAND TestRTPReceiver)
 add_test(NAME RTPTransmitter COMMAND TestRTPTransmitter)
 add_test(NAME StreamManager COMMAND TestStreamManager)

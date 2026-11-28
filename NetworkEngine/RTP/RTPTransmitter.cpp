@@ -57,6 +57,9 @@ RTPTransmitter::RTPTransmitter(
     std::random_device rd;
     ssrc_ = rd();
     nextTimestamp_ = rd();  // RFC 3550: start the RTP timeline at a random value
+    // RFC 3550 section 5.1: the initial sequence number SHOULD be random too
+    // (truncating an unsigned is well-defined and keeps it uniform)
+    sequenceNumber_ = static_cast<uint16_t>(rd());
 
     const size_t channels = std::max<size_t>(sdp_.numChannels, 1);
     buffer_ = std::make_unique<TimestampedAudioBuffer>(
@@ -108,8 +111,10 @@ bool RTPTransmitter::start() {
 
     // The IO thread writes this stream's output channels into the buffer
     if (!context_.routing.publish(buffer_.get(), static_cast<uint32_t>(mapping_.deviceChannelStart))) {
+        // %zu takes a size_t: cast, since the channel fields are narrower
         AES67_LOGF("RTPTransmitter::start: no route for device channels %zu-%zu (stream=%s)",
-                   mapping_.deviceChannelStart, mapping_.deviceChannelStart + sdp_.numChannels - 1,
+                   static_cast<size_t>(mapping_.deviceChannelStart),
+                   static_cast<size_t>(mapping_.deviceChannelStart + sdp_.numChannels - 1),
                    sdp_.sessionName.c_str());
         rtpSocket_.close();
         return false;
@@ -351,8 +356,11 @@ void RTPTransmitter::sendPacket(const uint8_t* payload, size_t payloadSize, uint
         uint64_t count = stats_.malformedPackets.fetch_add(1, std::memory_order_relaxed) + 1;
         // Log first occurrence and then every 100th to avoid flooding
         if (count == 1 || count % 100 == 0) {
+            // The sequence number just sent, as a 16-bit value: it can now be
+            // 0 after wrapping, and (sequenceNumber_ - 1) would then be int -1
+            const unsigned sentSequence = static_cast<uint16_t>(sequenceNumber_ - 1);
             AES67_LOGF("RTPTransmitter::sendPacket: send failed #%llu (seq=%u, errno=%d: %s) stream=%s",
-                       (unsigned long long)count, sequenceNumber_ - 1,
+                       (unsigned long long)count, sentSequence,
                        errno, strerror(errno), sdp_.sessionName.c_str());
         }
     }

@@ -3,7 +3,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <atomic>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <thread>
 #include <iostream>
 #include <vector>

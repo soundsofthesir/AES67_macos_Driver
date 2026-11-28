@@ -66,12 +66,16 @@ private:
 // Global logger instance
 extern std::unique_ptr<NonBlockingLogger> g_logger;
 
-// Macro for easy logging
-#define LOG_DEBUG(msg)    if (AES67::g_logger) AES67::g_logger->debug(msg)
-#define LOG_INFO(msg)     if (AES67::g_logger) AES67::g_logger->info(msg)
-#define LOG_WARNING(msg)  if (AES67::g_logger) AES67::g_logger->warning(msg)
-#define LOG_ERROR(msg)    if (AES67::g_logger) AES67::g_logger->error(msg)
-#define LOG_CRITICAL(msg) if (AES67::g_logger) AES67::g_logger->critical(msg)
+// Macros for easy logging.
+//
+// Each expands to a single statement (do { ... } while (0)). A bare
+// "if (g_logger) ..." would capture a following else:
+//     if (x) LOG_INFO("a"); else other();   // else would bind to the macro's if
+#define LOG_DEBUG(msg)    do { if (AES67::g_logger) { AES67::g_logger->debug(msg); } } while (0)
+#define LOG_INFO(msg)     do { if (AES67::g_logger) { AES67::g_logger->info(msg); } } while (0)
+#define LOG_WARNING(msg)  do { if (AES67::g_logger) { AES67::g_logger->warning(msg); } } while (0)
+#define LOG_ERROR(msg)    do { if (AES67::g_logger) { AES67::g_logger->error(msg); } } while (0)
+#define LOG_CRITICAL(msg) do { if (AES67::g_logger) { AES67::g_logger->critical(msg); } } while (0)
 
 } // namespace AES67
 

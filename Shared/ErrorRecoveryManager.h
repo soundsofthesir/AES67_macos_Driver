@@ -1,8 +1,10 @@
 #ifndef ERROR_RECOVERY_MANAGER_H
 #define ERROR_RECOVERY_MANAGER_H
 
+#include <atomic>
 #include <functional>
 #include <chrono>
+#include <cstddef>
 #include <unordered_map>
 #include <string>
 

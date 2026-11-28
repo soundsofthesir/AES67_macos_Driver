@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <functional>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <ctime>
@@ -216,8 +218,9 @@ StreamID StreamManager::addStream(const SDPSession& announced, const ChannelMapp
 
     // Add mapping to mapper
     if (!inputMapper_.addMapping(completeMapping)) {
+        // %zu takes a size_t: passing the narrower channel field is a varargs mismatch (UB)
         AES67_LOGF("StreamManager::addStream: mapper rejected mapping for '%s' (devCh=%zu, count=%u)",
-                   sdp.sessionName.c_str(), mapping.deviceChannelStart, sdp.numChannels);
+                   sdp.sessionName.c_str(), static_cast<size_t>(mapping.deviceChannelStart), sdp.numChannels);
         return StreamID::null();
     }
 
@@ -456,7 +459,7 @@ StreamID StreamManager::createTxStream(
     // Add mapping
     if (!outputMapper_.addMapping(completeMapping)) {
         AES67_LOGF("StreamManager::createTxStream: mapper rejected mapping for '%s' (devCh=%zu, count=%u)",
-                   name.c_str(), mapping.deviceChannelStart, numChannels);
+                   name.c_str(), static_cast<size_t>(mapping.deviceChannelStart), numChannels);
         return StreamID::null();
     }
 
