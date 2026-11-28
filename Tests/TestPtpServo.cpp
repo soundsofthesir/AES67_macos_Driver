@@ -138,6 +138,131 @@ void testGrandmasterTimeStep() {
           "and locks to the new time (" << r.phaseErrorNs << " ns)");
 }
 
+// #138: a step of a few ms is below the 10 ms step threshold; it must be
+// confirmed as a step, not fitted as ordinary Syncs that tilt the line (or,
+// negative, left on the old line while the Syncs fall below it)
+void testSmallGrandmasterStepIsFollowed() {
+    std::cout << "A jump of 1, 3 or 5 ms, either way, in the master's time is detected and followed" << std::endl;
+    constexpr double syncHz = 8.0;
+    constexpr double syncInterval = 1.0 / syncHz;
+    const Servo::Config config{};
+    // Positive steps need three agreeing Syncs (0.375 s at 8 Hz). A negative
+    // step first needs a negative bias window, which can take up to
+    // stepBiasSamples Syncs, then three agreeing candidates. Keep that 4-to-8
+    // Sync recognition delay explicit: (8 + 3) * 125 ms = 1.375 s worst case.
+    const double negativeStepLimit =
+        static_cast<double>(config.stepBiasSamples + config.stepConfirmSamples) * syncInterval;
+    for (const int64_t stepNs : {1000000LL, -1000000LL, 3000000LL, -3000000LL, 5000000LL, -5000000LL}) {
+        Simulation sim(Master{}, Network{}, syncHz, 8);
+        sim.runUntil(60);
+        const uint32_t before = sim.measure().generation;
+        sim.master().stepNs = stepNs;
+        const double resetLimit = stepNs > 0 ? 0.5 : negativeStepLimit;
+        double resetDelay = 0.0;
+        for (double elapsed = syncInterval; elapsed <= resetLimit + syncInterval / 2; elapsed += syncInterval) {
+            sim.runUntil(60.0 + elapsed);
+            if (sim.measure().generation != before) {
+                resetDelay = elapsed;
+                break;
+            }
+        }
+        CHECK(resetDelay > 0.0 && resetDelay <= resetLimit,
+              "a " << stepNs / 1000000 << " ms step starts a new timeline within " << resetLimit
+                   << " s (observed " << resetDelay << " s)");
+
+        int lockedWhileWrong = 0;
+        for (double t = 60.0 + resetLimit + syncInterval; t <= 120.0; t += syncInterval) {
+            sim.runUntil(t);
+            const Run s = sim.measure();
+            if (std::fabs(s.phaseErrorNs) > config.lockThresholdNs &&
+                s.state == Servo::State::Locked) {
+                ++lockedWhileWrong;
+            }
+        }
+        const Run r = sim.measure();
+        CHECK(r.generation == before + 1,
+              "a " << stepNs / 1000000 << " ms step starts one new timeline (generation " << r.generation << ")");
+        CHECK(std::fabs(r.rateErrorPpm) < 5.0,
+              "a " << stepNs / 1000000 << " ms step leaves the rate within 5 ppm (" << r.rateErrorPpm << " ppm)");
+        CHECK(std::fabs(r.phaseErrorNs) < 50000 && r.state == Servo::State::Locked,
+              "a " << stepNs / 1000000 << " ms step is locked to within 50 us (" << r.phaseErrorNs << " ns)");
+        CHECK(std::fabs(r.pathDelayNs - 300000) < 5000,
+              "a " << stepNs / 1000000 << " ms step: path delay within 5 us of 300 us (" << r.pathDelayNs << ")");
+        CHECK(lockedWhileWrong == 0,
+              "a " << stepNs / 1000000 << " ms step: locked while the phase was off by over 100 us at "
+                   << lockedWhileWrong << " points after the reset bound");
+    }
+}
+
+// #138: a single Sync a little above the line (not a step) must not start a
+// new timeline or drop lock: queueing never makes a Sync early, so only a
+// sustained bias counts
+void testIsolatedPositiveExcursionIsNotAStep() {
+    std::cout << "Isolated Syncs 1.5 ms above the line do not start a new timeline or drop lock" << std::endl;
+    Servo servo;
+    Master m;
+    for (int i = 1; i <= 800; ++i) {
+        const uint64_t host = static_cast<uint64_t>(i) * 125000000ULL;
+        uint64_t master = m.at(host);
+        if (i > 200 && i % 25 == 0) master += 1500000;  // one Sync in 25, 1.5 ms late on the master side
+        servo.onSync(host + 300000, master, 0.0);
+    }
+    CHECK(servo.generation() == 1, "isolated excursions start no new timeline (generation " << servo.generation() << ")");
+    CHECK(servo.state() == Servo::State::Locked, "still locked after them (state " << int(servo.state()) << ")");
+}
+
+// #211: sustained receive queueing creates a negative Sync bias, but cannot
+// move the reciprocal Delay_Req measurements down like a master-time step.
+void testSustainedQueueBurstsAreNotSteps() {
+    std::cout << "Sustained millisecond queue bursts do not start a new timeline" << std::endl;
+    struct Burst { double minNs; double maxNs; double durationSeconds; };
+    for (const Burst burst : {Burst{1200000.0, 2000000.0, 2.0},
+                              Burst{1500000.0, 3000000.0, 2.0},
+                              Burst{1500000.0, 3000000.0, 5.0},
+                              Burst{600000.0, 1500000.0, 3.0},
+                              Burst{1000000.0, 3000000.0, 3.0}}) {
+        Network network;
+        network.burstEverySeconds = 20.0;
+        network.burstSeconds = burst.durationSeconds;
+        network.burstMinNs = burst.minNs;
+        network.jitterNs = burst.maxNs;
+        Simulation sim(Master{}, network, 8.0, 3);
+        double changedAt = 0.0;
+        for (double t = 0.125; t <= 300.0; t += 0.125) {
+            sim.runUntil(t);
+            if (changedAt == 0.0 && sim.measure().generation != 1) changedAt = t;
+        }
+        CHECK(sim.measure().generation == 1,
+              "queueing " << burst.minNs / 1e6 << "-" << burst.maxNs / 1e6 << " ms for "
+                          << burst.durationSeconds << " s does not change generation ("
+                          << sim.measure().generation << ", first change at " << changedAt << " s)");
+    }
+}
+
+// #211: a queue burst from the first Sync leaves the young line resting on
+// queued Syncs. When the queue drains, clean Syncs land above that line, which
+// must be read as the line catching up (congestion recovery), not as a step
+// up in the master's time. Seed 4 is a run in which that happens just after
+// the line settles: without the recovery guard it starts a new timeline at
+// 9.75 s.
+void testQueueRecoveryAfterStartupBurstIsNotAStep() {
+    std::cout << "Clean Syncs after a startup queue burst do not start a new timeline" << std::endl;
+    Network network;
+    network.burstEverySeconds = 10.0;
+    network.burstSeconds = 8.0;
+    network.burstMinNs = 1500000.0;
+    network.jitterNs = 3000000.0;
+    Simulation sim(Master{}, network, 8.0, 4);
+    double changedAt = 0.0;
+    for (double t = 0.125; t <= 60.0; t += 0.125) {
+        sim.runUntil(t);
+        if (changedAt == 0.0 && sim.measure().generation != 1) changedAt = t;
+    }
+    CHECK(sim.measure().generation == 1,
+          "recovery from a startup burst does not change generation (" << sim.measure().generation
+                                                                       << ", first change at " << changedAt << " s)");
+}
+
 void testHoldover() {
     std::cout << "Holdover keeps time when the master goes quiet, then resumes" << std::endl;
     Simulation sim(Master{}, Network{}, 4.0, 7);
@@ -340,6 +465,10 @@ int main() {
     testLockIsJudgedIndependently();
     testStaysLockedThroughBursts();
     testGrandmasterTimeStep();
+    testSmallGrandmasterStepIsFollowed();
+    testIsolatedPositiveExcursionIsNotAStep();
+    testSustainedQueueBurstsAreNotSteps();
+    testQueueRecoveryAfterStartupBurstIsNotAStep();
     testHoldover();
     testHoldoverStepIsNotLocked();
     testNoHoldoverBeforeLock();
