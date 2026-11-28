@@ -426,6 +426,33 @@ void testPacketTimingValidation() {
     std::cout << "PASSED\n";
 }
 
+// Only encodings the RTP path implements, and dynamic payload types (the RTP
+// header field is 7 bits; 96-127 are the dynamic range) are accepted (#117)
+void testEncodingAndPayloadTypeValidation() {
+    std::cout << "Test: encoding and payload type validation... ";
+
+    auto session = [](const char* encoding, uint8_t payloadType) {
+        SDPSession s;
+        s.sessionName = "Encoding";
+        s.connectionAddress = "239.69.1.1";
+        s.encoding = encoding;
+        s.payloadType = payloadType;
+        s.sampleRate = 48000;
+        s.ptime = 1.0;
+        s.framecount = 0;
+        return s;
+    };
+
+    assert(session("L16", 96).isValid());
+    assert(session("L24", 127).isValid());
+    assert(!session("AM824", 96).isValid());
+    assert(!session("L24", 95).isValid());
+    assert(!session("L24", 128).isValid());
+    assert(!session("L24", 224).isValid());
+
+    std::cout << "PASSED\n";
+}
+
 // Numbers out of their field's range are refused, not wrapped into it (#73):
 // port 65541 used to read as 5, 65664 channels as 128, TTL -1 as 255
 void testNumericRanges() {
@@ -771,6 +798,7 @@ void runAllTests() {
     testRtpmapWithoutChannelCount();
     testPacketTimingValidation();
     testNumericRanges();
+    testEncodingAndPayloadTypeValidation();
     testMediaAndRtpmapRequired();
     testOriginRequired();
     testControlCharactersRejected();

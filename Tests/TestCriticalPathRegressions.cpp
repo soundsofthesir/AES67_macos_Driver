@@ -1677,6 +1677,36 @@ void testStreamAddressesAreParsed() {
     capture.close();
 }
 
+// Only the encodings the RTP path implements, and dynamic payload types, are
+// accepted when a stream is added (#117)
+void testEncodingAndPayloadTypeRefused() {
+    std::cout << "#117: AM824 and payload types outside 96-127 are refused when adding a stream" << std::endl;
+    useEmptyConfig("encodingpt");
+    RxHarness harness;
+    TxRouting txRouting;
+    StreamManager manager(harness.context(), TxContext{harness.clock, txRouting}, testSap());
+
+    std::string error;
+    SDPSession am824 = makeRxSDP("239.69.99.95", 55150, 2);
+    am824.encoding = "AM824";
+    CHECK(!manager.canAddStream(am824, &error) && error.find("Unsupported encoding") != std::string::npos,
+          "an AM824 RX stream should be refused (" << error << ")");
+
+    for (uint8_t pt : {uint8_t{95}, uint8_t{128}, uint8_t{224}}) {
+        error.clear();
+        SDPSession bad = makeRxSDP("239.69.99.96", 55152, 2);
+        bad.payloadType = pt;
+        CHECK(!manager.canAddStream(bad, &error) && error.find("Payload type must be 96-127") != std::string::npos,
+              "payload type " << int(pt) << " should be refused (" << error << ")");
+    }
+
+    error.clear();
+    SDPSession good = makeRxSDP("239.69.99.97", 55154, 2);
+    good.payloadType = 127;
+    CHECK(manager.canAddStream(good, &error), "payload type 127 should be accepted (" << error << ")");
+    manager.removeAllStreams();
+}
+
 void testUnicastRxNeedsItsOwnPort() {
     std::cout << "#106: a unicast RX stream needs a port no other RX stream uses" << std::endl;
     useEmptyConfig("unicastport");
@@ -2706,6 +2736,7 @@ int main() {
     testSavedStreamsHoldTheirChannels();
     testDuplicateGroupIsRejected();
     testStreamAddressesAreParsed();
+    testEncodingAndPayloadTypeRefused();
     testUnicastRxNeedsItsOwnPort();
     testUnicastTxUsesItsTtlAndInterface();
     testMappingCoversTheWholeStream();

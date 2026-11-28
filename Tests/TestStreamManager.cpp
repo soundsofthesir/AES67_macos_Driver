@@ -375,7 +375,7 @@ bool testEncodingSupport() {
 
     SDPSession am824 = createTestSDP();
     am824.encoding = "AM824";
-    TEST_ASSERT(am824.encoding == "AM824", "AM824 encoding should be supported");
+    TEST_ASSERT(!am824.isValid(), "AM824 encoding should be refused (#117)");
 
     std::cout << "PASS" << std::endl;
     return true;
