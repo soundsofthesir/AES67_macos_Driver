@@ -19,6 +19,7 @@
 //
 
 #include "PtpServoSimulation.h"
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <optional>
@@ -34,12 +35,15 @@ constexpr double kEventSeconds = 120.0;  // when a scenario's event (a jump, a n
 constexpr double kEndSeconds = 360.0;
 constexpr double kSampleSeconds = 0.125;
 constexpr uint32_t kSeeds[] = {11, 12, 13};
-// A jump is confirmed by stepConfirmSamples Syncs, 0.375 s at 8 Sync/s: the
-// servo can't know sooner, so it may stay Locked on the old time that long
-constexpr double kConfirmSeconds = 0.5;
+// A jump is confirmed by stepConfirmSamples Syncs, 0.375 s at 8 Sync/s and
+// 3 s at 1 Sync/s: the servo can't know sooner, so it may stay Locked on the
+// old time that long, plus one measurement
+double confirmSeconds(double syncHz) {
+    return static_cast<double>(Servo::Config{}.stepConfirmSamples) / syncHz + kSampleSeconds;
+}
 // A jump down looks like queueing until a Delay_Req sent after it comes
 // back: up to one Delay_Req interval (1 s here) plus a Sync
-constexpr double kDownJumpSeconds = 1.125;
+double downJumpSeconds(double syncHz) { return 1.0 + 1.0 / syncHz; }
 
 struct Limits {
     uint32_t minRestarts{0};
@@ -149,31 +153,34 @@ Network congested(double minMs, double maxMs, double seconds, bool syncOnly = fa
 
 // The servo follows a jump with one new timeline, and is Locked on the old
 // time only until the jump is confirmed
-Limits followsJump() {
+Limits followsJump(double syncHz = 8.0) {
     Limits l;
     l.minRestarts = 1;
     l.maxRestarts = 1;
     l.minLockedFraction = 0.8;
-    l.maxWrongWhileLockedSeconds = kConfirmSeconds;
+    l.maxWrongWhileLockedSeconds = confirmSeconds(syncHz);
     return l;
 }
 
-Scenario jump(double stepMs) {
+Scenario jump(double stepMs, double syncHz = 8.0) {
     Scenario s;
     char name[64];
-    std::snprintf(name, sizeof name, "master jumps %+g ms", stepMs);
+    if (syncHz == 8.0) std::snprintf(name, sizeof name, "master jumps %+g ms", stepMs);
+    else std::snprintf(name, sizeof name, "master jumps %+g ms, %g Sync/s", stepMs, syncHz);
     s.name = name;
+    s.syncHz = syncHz;
     const auto stepNs = static_cast<int64_t>(stepMs * 1e6);
     s.event = [stepNs](Master& m) { m.stepNs = stepNs; };
-    s.limits = followsJump();
+    s.limits = followsJump(syncHz);
     return s;
 }
 
 // #138, #226: a small jump down is told apart from queueing by the next
 // Delay_Req, so it may stay Locked on the old time longer than a jump up
-Scenario smallDownJump(double stepMs) {
-    Scenario s = jump(stepMs);
-    s.limits.maxWrongWhileLockedSeconds = kDownJumpSeconds;
+// (and, at a slow Sync rate, as long as the Syncs take to confirm it)
+Scenario smallDownJump(double stepMs, double syncHz = 8.0) {
+    Scenario s = jump(stepMs, syncHz);
+    s.limits.maxWrongWhileLockedSeconds = std::max(downJumpSeconds(syncHz), confirmSeconds(syncHz));
     return s;
 }
 
@@ -203,16 +210,12 @@ std::vector<Scenario> scenarios() {
     }
 
     {
-        // #213: the first line is fitted to queued Syncs and the path delay
-        // measured against it stays for 64 s. Today: Locked but about one
-        // path delay off for about 13 s
+        // #213: the first line is fitted to queued Syncs. A path delay
+        // measured against it must not be kept, or the servo reports Locked
+        // about one path delay off
         Scenario s;
         s.name = "starts while all packets are held 1.5-3 ms for 5 s every 20 s";
         s.network = congested(1.5, 3.0, 5, false, 0.0);
-        s.limits.maxWrongWhileLockedSeconds = 20.0;
-        Limits target = s.limits;
-        target.maxWrongWhileLockedSeconds = 0.0;
-        s.gap = KnownGap{"#213", target};
         all.push_back(s);
     }
 
@@ -237,6 +240,10 @@ std::vector<Scenario> scenarios() {
     all.push_back(jump(-20));
     for (double ms : {+1.0, +3.0}) all.push_back(jump(ms));
     for (double ms : {-1.0, -3.0}) all.push_back(smallDownJump(ms));
+    // #229: at 1 Sync/s the new timeline has few Syncs when it could first
+    // lock, so its line is still moving
+    for (double ms : {+20.0, -20.0, +1.0}) all.push_back(jump(ms, 1.0));
+    all.push_back(smallDownJump(-1.0, 1.0));
 
     {
         Scenario s;

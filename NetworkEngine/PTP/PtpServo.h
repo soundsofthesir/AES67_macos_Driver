@@ -23,16 +23,19 @@ namespace Ptp {
 /// quarters of the way across the window (a long baseline, so timestamp
 /// noise barely tilts it; the hull edge over the mean time when the hull is
 /// too sparse), and the line at that slope rests on the hull. The path delay
-/// comes from the least-queued Delay_Req over a long history (it is stable),
-/// each measured against the line when it arrived, so a later change of
-/// slope cannot rewrite it.
+/// comes from the least-queued Delay_Req over a long history (it is stable).
+/// Until the first lock each is measured against the newest line; from then
+/// on, against the line when it arrived, so a later change of slope cannot
+/// rewrite it.
 ///
 /// Lock is judged independently of the estimate: by how well it predicts
 /// each new Sync before that Sync is used, and by how few Syncs had to be
 /// rejected. A real network delivers a good share of Syncs unqueued, so many
 /// predictions are close; garbage leaves only the odd one on the line, so
-/// "how many are good" is the test, not "is the best one good". Holding lock
-/// is judged more leniently than acquiring it. A jump in the master's time
+/// "how many are good" is the test, not "is the best one good". Acquiring
+/// lock also needs the last few estimates to agree with the current one: a
+/// young line can predict well enough while it is still being corrected.
+/// Holding lock is judged more leniently than acquiring it. A jump in the master's time
 /// (a new grandmaster epoch) is confirmed by consecutive agreeing Syncs, then
 /// starts a new timeline (generation). A line further from the host clock's
 /// rate than any real clock could be never locks.
@@ -52,6 +55,11 @@ public:
         size_t lockHistory{16};          // predictions judged to acquire lock
         double lockThresholdNs{100000};  // a good prediction is within 100 us
         double lockGoodFraction{0.25};   // of recent predictions that must be good
+        // And the estimate (line plus path delay) has stopped moving: each of
+        // the last lockHistory estimates puts the newest Sync within this of
+        // where the current one does. Few Syncs (1 per second) leave a young
+        // line that predicts well enough but is still being corrected
+        double lockAgreementNs{50000};
         // Once locked, judged over a longer history at twice the threshold:
         // receive delays on macOS come in bursts (CPU wake-ups), which can
         // spoil a second's worth of Syncs while the estimate stays good
@@ -124,8 +132,8 @@ private:
         uint64_t hostSend;
         uint64_t masterReceive;
         // t4 - E(t3), fixed against the line as it stood when the pair
-        // arrived (accurate near its recent end); until the line has
-        // settled, re-measured against each new line
+        // arrived (accurate near its recent end); until the servo has
+        // first locked, re-measured against each new line
         std::optional<double> twiceDelay;
     };
     struct LineSnapshot {
@@ -151,6 +159,7 @@ private:
     double envelopeOffsetAt(uint64_t hostNs) const;  // E(h) - p0, in ns
     void updatePathDelay();
     bool settled() const;  // enough Syncs, over a long enough span, to trust the line
+    bool agrees() const;   // the recent estimates all agree with the current one
     bool congested() const;  // the median of recent errors is well below the line
     void trackDownStep();
     bool downStepEvidence() const;  // a Delay_Req moved down too, ruling out Sync queueing
@@ -162,6 +171,7 @@ private:
     std::deque<Sample> samples_;
     std::deque<DelayPair> delays_;
     std::deque<double> predictionErrors_;  // t1 - E(t2) before each accepted Sync, newest last
+    std::deque<Estimate> estimates_;       // after each accepted Sync, newest last
     std::deque<RecentSync> recent_;        // newest last
     std::optional<DownStep> downStep_;     // while a step down is suspected
     size_t congestionRecoveryCooldown_{0};  // Syncs on the line still needed after queueing
@@ -179,6 +189,7 @@ private:
 
     uint64_t lastSyncNs_{0};       // host receive time of the latest Sync
     uint64_t holdoverSinceNs_{0};
+    bool lockedOnce_{false};  // on this timeline: from then on, path delays are fixed
 
     State state_{State::Acquiring};
     uint32_t generation_{1};
