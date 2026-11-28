@@ -33,6 +33,8 @@ void Servo::startTimeline() {
     samples_.clear();
     delays_.clear();
     predictionErrors_.clear();
+    estimates_.clear();
+    lockedOnce_ = false;
     recent_.clear();
     downStep_.reset();
     congestionRecoveryCooldown_ = 0;
@@ -148,6 +150,8 @@ void Servo::addSample(const Sample& sample) {
     }
     refit();
     updatePathDelay();
+    estimates_.push_back(*estimate());
+    if (estimates_.size() > config_.lockHistory) estimates_.pop_front();
     judgeLock();
 }
 
@@ -227,6 +231,14 @@ bool Servo::settled() const {
            nanosBetween(samples_.back().host, samples_.front().host) >= config_.minSpanSeconds * 1e9;
 }
 
+bool Servo::agrees() const {
+    if (estimates_.size() < config_.lockHistory) return false;
+    const Estimate& now = estimates_.back();
+    return std::all_of(estimates_.begin(), estimates_.end(), [this, &now](const Estimate& e) {
+        return std::fabs(nanosBetween(e.masterAt(now.hostAnchorNs), now.masterAnchorNs)) <= config_.lockAgreementNs;
+    });
+}
+
 bool Servo::congested() const {
     if (recent_.size() < config_.stepBiasSamples) return false;
     std::deque<double> errors;
@@ -291,7 +303,7 @@ void Servo::updatePathDelay() {
         return;
     }
     // t4 = E(t3) + 2 x delay + queueing: the least-queued exchange gives the delay
-    const bool fix = settled();
+    const bool fix = lockedOnce_;
     double best = 0.0;
     bool first = true;
     for (auto& d : delays_) {
@@ -324,12 +336,14 @@ void Servo::judgeLock() {
                                         [threshold](double error) { return std::fabs(error) <= threshold; });
         const double fraction = holding ? config_.holdGoodFraction : config_.lockGoodFraction;
         predicts = static_cast<double>(good) >= fraction * static_cast<double>(history);
+        if (!holding) predicts = predicts && agrees();
     }
     const bool plausible = std::fabs(slope_ - 1.0) <= config_.maxRateErrorPpm * 1e-6;
     // Syncs below the line alone may be receive queueing. Lock drops only
     // once a Delay_Req confirms the master's time moved down
     const bool steppedDown = downStepEvidence();
     state_ = (enough && predicts && consistent && plausible && !steppedDown) ? State::Locked : State::Acquiring;
+    if (state_ == State::Locked) lockedOnce_ = true;
 }
 
 std::optional<Servo::Estimate> Servo::estimate() const {
