@@ -371,6 +371,19 @@ float clipSample(float sample) {
     return std::max(-1.0f, std::min(1.0f, sample));
 }
 
+// Decode divides by 2^(N-1) (full scale); encode must multiply by the same
+// power of two or decode -> encode is not the identity (#136).
+constexpr float kL16Scale = 32768.0f;    // 2^15
+constexpr float kL24Scale = 8388608.0f;  // 2^23
+
+/// sample * scale rounded to nearest (ties to even, current FP mode), then
+/// clamped to [lo, hi]. +1.0 maps one step past the positive end of two's
+/// complement (+32768 / +8388608) and is the only value the clamp touches.
+int32_t quantize(float sample, float scale, int32_t lo, int32_t hi) {
+    const long scaled = std::lrintf(clipSample(sample) * scale);
+    return static_cast<int32_t>(std::min<long>(hi, std::max<long>(lo, scaled)));
+}
+
 } // namespace
 
 //
@@ -379,10 +392,8 @@ float clipSample(float sample) {
 
 void L16Codec::encode(const float* samples, size_t numSamples, uint8_t* output) {
     for (size_t i = 0; i < numSamples; i++) {
-        const float sample = clipSample(samples[i]);
-
-        // Convert to 16-bit signed integer
-        int16_t pcm = static_cast<int16_t>(sample * 32767.0f);
+        // Exact inverse of decode (x / 32768): round to nearest, clamp to int16 range
+        const int16_t pcm = static_cast<int16_t>(quantize(samples[i], kL16Scale, -32768, 32767));
 
         // Store as big-endian (network byte order)
         output[i * 2 + 0] = (pcm >> 8) & 0xFF;  // MSB
@@ -410,10 +421,8 @@ void L16Codec::decode(const uint8_t* input, size_t numBytes, float* samples) {
 
 void L24Codec::encode(const float* samples, size_t numSamples, uint8_t* output) {
     for (size_t i = 0; i < numSamples; i++) {
-        const float sample = clipSample(samples[i]);
-
-        // Convert to 24-bit signed integer
-        int32_t pcm = static_cast<int32_t>(sample * 8388607.0f); // 2^23 - 1
+        // Exact inverse of decode (x / 2^23): round to nearest, clamp to 24-bit range
+        const int32_t pcm = quantize(samples[i], kL24Scale, -8388608, 8388607);
 
         // Store as big-endian 24-bit (network byte order)
         output[i * 3 + 0] = (pcm >> 16) & 0xFF;  // MSB

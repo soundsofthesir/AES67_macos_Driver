@@ -228,9 +228,9 @@ bool testNonFiniteSamples() {
     };
     TEST_ASSERT(pcm16(0) == 0 && pcm16(1) == 0, "L16: NaN and -NaN should encode as 0");
     TEST_ASSERT(pcm24(0) == 0 && pcm24(1) == 0, "L24: NaN and -NaN should encode as 0");
-    TEST_ASSERT(pcm16(2) == 32767 && pcm16(3) == -32767 && pcm16(4) == 32767 && pcm16(5) == -32767,
+    TEST_ASSERT(pcm16(2) == 32767 && pcm16(3) == -32768 && pcm16(4) == 32767 && pcm16(5) == -32768,
                 "L16: infinities and +/-2.0 should clip to full scale");
-    TEST_ASSERT(pcm24(2) == 8388607 && pcm24(3) == -8388607 && pcm24(4) == 8388607 && pcm24(5) == -8388607,
+    TEST_ASSERT(pcm24(2) == 8388607 && pcm24(3) == -8388608 && pcm24(4) == 8388607 && pcm24(5) == -8388608,
                 "L24: infinities and +/-2.0 should clip to full scale");
 
     std::cout << "PASS" << std::endl;

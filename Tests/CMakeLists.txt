@@ -86,6 +86,19 @@ target_include_directories(TestRTPTransmitter PRIVATE
 
 target_compile_features(TestRTPTransmitter PRIVATE cxx_std_17)
 
+# Test: L16/L24 codec is bit-exact decode -> encode (#136)
+add_executable(TestCodecBitExact
+    TestCodecBitExact.cpp
+    ../NetworkEngine/RTP/SimpleRTP.cpp
+    ../Shared/Types.cpp
+)
+
+target_include_directories(TestCodecBitExact PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_features(TestCodecBitExact PRIVATE cxx_std_17)
+
 # Test: Stream Manager
 add_executable(TestStreamManager
     TestStreamManager.cpp
@@ -512,6 +525,7 @@ add_test(NAME ChannelMapper COMMAND TestChannelMapper)
 add_test(NAME RingBuffer COMMAND TestRingBuffer)
 add_test(NAME RTPReceiver COMMAND TestRTPReceiver)
 add_test(NAME RTPTransmitter COMMAND TestRTPTransmitter)
+add_test(NAME CodecBitExact COMMAND TestCodecBitExact)
 add_test(NAME StreamManager COMMAND TestStreamManager)
 add_test(NAME StreamConfig COMMAND TestStreamConfig)
 add_test(NAME StreamSetup COMMAND TestStreamSetup)
